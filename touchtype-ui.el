@@ -38,12 +38,16 @@
     ;; Bind all printable ASCII characters (space through tilde)
     (dolist (c (number-sequence 32 126))
       (define-key map (vector c) #'touchtype-ui--handle-char))
-    (define-key map (kbd "DEL")           #'touchtype-ui--handle-backspace)
-    (define-key map (kbd "M-DEL")         #'touchtype-ui--handle-word-backspace)
-    (define-key map (kbd "M-<backspace>") #'touchtype-ui--handle-word-backspace)
-    (define-key map (kbd "C-w")           #'touchtype-ui--handle-word-backspace)
-    (define-key map (kbd "RET")           #'touchtype-ui--ignore-key)
-    (define-key map (kbd "C-g")           #'touchtype-ui--quit)
+    (define-key map (kbd "DEL") #'touchtype-ui--handle-backspace)
+    ;; Remap word-deletion commands rather than binding specific keys.
+    ;; This fires regardless of what key the user has bound the command to
+    ;; (C-<backspace>, M-DEL, C-w, etc.).
+    (define-key map [remap backward-kill-word]
+                #'touchtype-ui--handle-word-backspace)
+    (define-key map [remap evil-delete-backward-word]
+                #'touchtype-ui--handle-word-backspace)
+    (define-key map (kbd "RET") #'touchtype-ui--ignore-key)
+    (define-key map (kbd "C-g") #'touchtype-ui--quit)
     map)
   "Keymap used in the *touchtype* training buffer.
 Captures all printable keys and routes them to the typing handler.")
