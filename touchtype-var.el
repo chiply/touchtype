@@ -345,7 +345,10 @@ suitable for typing practice.")
   "List of WPM values recorded during the current session.")
 
 (defvar touchtype--session-errors 0
-  "Total error count for the current session.")
+  "Total error count for the current session (never decremented by backspace).")
+
+(defvar touchtype--session-total-keys 0
+  "Total number of keypresses in the current session (never decremented by backspace).")
 
 (defvar touchtype--session-word-count 0
   "Number of words typed so far in the current session.")

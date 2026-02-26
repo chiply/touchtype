@@ -63,6 +63,7 @@ Captures all printable keys and routes them to the typing handler.")
                        touchtype--last-key-time
                        touchtype--session-wpm-samples
                        touchtype--session-errors
+                       touchtype--session-total-keys
                        touchtype--session-word-count
                        touchtype--focused-key
                        touchtype--target-start
@@ -76,6 +77,7 @@ Captures all printable keys and routes them to the typing handler.")
         (setq touchtype--unlocked-keys (touchtype-stats-get-unlocked-keys))
         (setq touchtype--session-wpm-samples nil
               touchtype--session-errors      0
+              touchtype--session-total-keys  0
               touchtype--session-word-count  0
               touchtype--focused-key         nil
               touchtype--typed-chars         nil)
@@ -168,11 +170,11 @@ _CHAR is accepted for API compatibility but unused."
                       (format "%.0f" (/ (cl-reduce #'+ samples)
                                         (float (length samples))))
                     "--"))
-         (total   (+ (length (cl-remove-if-not #'cadr touchtype--typed-chars))
-                     (length (cl-remove-if #'cadr touchtype--typed-chars))))
-         (correct (length (cl-remove-if-not #'cadr touchtype--typed-chars)))
+         (total   touchtype--session-total-keys)
          (acc     (if (> total 0)
-                      (format "%.0f%%" (* 100.0 (/ (float correct) total)))
+                      (format "%.0f%%"
+                              (* 100.0 (/ (float (- total touchtype--session-errors))
+                                          total)))
                     "--"))
          (mode    (symbol-name touchtype-mode-selection))
          (keys    (if (eq touchtype-mode-selection 'progressive)
@@ -221,6 +223,7 @@ _CHAR is accepted for API compatibility but unused."
        (if correct-p 'touchtype-face-correct 'touchtype-face-wrong))
       ;; Track for status display
       (push (list char correct-p elapsed) touchtype--typed-chars)
+      (cl-incf touchtype--session-total-keys)
       (unless correct-p (cl-incf touchtype--session-errors))
       ;; Advance cursor
       (setq touchtype--cursor-pos (1+ pos))
@@ -322,11 +325,11 @@ _CHAR is accepted for API compatibility but unused."
                        (/ (cl-reduce #'+ samples)
                           (float (length samples)))
                      0.0))
-         (total-keys (length touchtype--typed-chars))
-         (correct    (length (cl-remove-if-not #'cadr touchtype--typed-chars)))
+         (total-keys touchtype--session-total-keys)
          (accuracy   (if (> total-keys 0)
-                         (* 100.0 (/ (float correct) total-keys))
-                       0.0))
+                         (* 100.0 (/ (float (- total-keys touchtype--session-errors))
+                                     total-keys))
+                       100.0))
          (weak       (seq-take (touchtype-stats-get-weak-letters) 3)))
     ;; Record the session
     (touchtype-stats-record-session avg-wpm accuracy
@@ -359,6 +362,7 @@ _CHAR is accepted for API compatibility but unused."
   (interactive)
   (setq touchtype--session-wpm-samples nil
         touchtype--session-errors      0
+        touchtype--session-total-keys  0
         touchtype--session-word-count  0
         touchtype--typed-chars         nil)
   (use-local-map touchtype-ui--keymap)
