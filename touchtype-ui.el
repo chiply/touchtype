@@ -66,7 +66,6 @@ Captures all printable keys and routes them to the typing handler.")
                        touchtype--session-word-count
                        touchtype--focused-key
                        touchtype--target-start
-                       touchtype--typed-start
                        touchtype--status-start
                        touchtype--cursor-overlay
                        touchtype--char-overlays
@@ -102,72 +101,57 @@ Captures all printable keys and routes them to the typing handler.")
   (let ((inhibit-read-only t)
         (text touchtype--current-text))
     (erase-buffer)
-    ;; Padding
-    (insert "\n")
-    ;; Target line
+    ;; Vertical padding
+    (insert "\n\n")
+    ;; Single text line: each character gets an overlay starting as gray.
+    ;; The user types "over" this text; overlays change face as keys are pressed.
+    (insert "  ")
     (setq touchtype--target-start (point-marker))
-    (insert "  ")
-    (let ((tstart (point)))
-      (insert (propertize text 'face 'touchtype-face-target))
-      (ignore tstart))
-    (insert "  \n\n")
-    ;; Typed feedback line (pre-filled spaces with shadow face)
-    (setq touchtype--typed-start (point-marker))
-    (insert "  ")
     (let ((n (length text)))
       (setq touchtype--char-overlays (make-vector n nil))
       (dotimes (i n)
-        (let* ((pos (point))
-               (ov  (make-overlay pos (1+ pos))))
-          (insert (propertize " " 'face 'touchtype-face-untyped))
+        (let* ((buf-pos (point))
+               (ov      (make-overlay buf-pos (1+ buf-pos))))
+          (insert (aref text i))
           (overlay-put ov 'face 'touchtype-face-untyped)
           (aset touchtype--char-overlays i ov))))
-    (insert "  \n\n")
+    (insert "\n\n")
     ;; Status line
     (setq touchtype--status-start (point-marker))
     (insert (touchtype-ui--status-string))
     (insert "\n")
-    ;; Place cursor overlay at position 0
+    ;; Cursor underline on first character
     (touchtype-ui--update-cursor-overlay)))
 
 (defun touchtype-ui--update-cursor-overlay ()
-  "Move the cursor overlay to the current `touchtype--cursor-pos'."
+  "Underline the character at `touchtype--cursor-pos' in the text line."
   (when touchtype--cursor-overlay
     (delete-overlay touchtype--cursor-overlay)
     (setq touchtype--cursor-overlay nil))
   (let ((pos touchtype--cursor-pos)
         (n   (length touchtype--current-text)))
     (when (< pos n)
-      (let* ((buf-pos (+ (marker-position touchtype--typed-start)
-                         2 pos))          ; +2 for the leading "  "
+      (let* ((buf-pos (+ (marker-position touchtype--target-start) pos))
              (ov (make-overlay buf-pos (1+ buf-pos))))
         (overlay-put ov 'face 'touchtype-face-cursor)
         (overlay-put ov 'priority 10)
         (setq touchtype--cursor-overlay ov)))))
 
-(defun touchtype-ui--update-typed-char (pos char face)
-  "Update the typed-feedback display at position POS.
-CHAR is the typed character to show; FACE is the display face."
-  (let ((buf-pos (+ (marker-position touchtype--typed-start)
-                    2 pos)))             ; +2 for leading "  "
-    (let ((inhibit-read-only t))
-      (save-excursion
-        (goto-char buf-pos)
-        (delete-char 1)
-        (insert (propertize (string char) 'face face)))))
-  (when (aref touchtype--char-overlays pos)
-    (delete-overlay (aref touchtype--char-overlays pos))
-    (aset touchtype--char-overlays pos nil)))
+(defun touchtype-ui--update-typed-char (pos _char face)
+  "Apply FACE to the overlay at POS in the target text.
+The target character is already in the buffer; only its face changes.
+_CHAR is accepted for API compatibility but unused."
+  (let ((ov (aref touchtype--char-overlays pos)))
+    (when ov
+      (overlay-put ov 'face face)
+      (overlay-put ov 'priority 5))))
 
 (defun touchtype-ui--update-typed-space (pos)
-  "Reset the typed-feedback display at POS to a shadowed space."
-  (let ((buf-pos (+ (marker-position touchtype--typed-start)
-                    2 pos)))
-    (let ((inhibit-read-only t))
-      (save-excursion
-        (goto-char buf-pos)
-        (delete-char 1)
-        (insert (propertize " " 'face 'touchtype-face-untyped))))))
+  "Reset the overlay at POS to the untyped (gray) face."
+  (let ((ov (aref touchtype--char-overlays pos)))
+    (when ov
+      (overlay-put ov 'face 'touchtype-face-untyped)
+      (overlay-put ov 'priority 5))))
 
 (defun touchtype-ui--update-status ()
   "Rewrite the status line in place."

@@ -86,24 +86,18 @@ One of: `progressive', `full-words', `bigram-drill', `letters',
   :group 'touchtype)
 
 (defface touchtype-face-correct
-  '((t :inherit success))
-  "Face for characters typed correctly."
+  '((t :inherit default))
+  "Face for correctly typed characters (normal foreground color)."
   :group 'touchtype)
 
 (defface touchtype-face-wrong
-  '((t :inherit error))
-  "Face for characters typed incorrectly."
+  '((t :foreground "red"))
+  "Face for incorrectly typed characters."
   :group 'touchtype)
 
 (defface touchtype-face-cursor
-  '((((type graphic)) :box (:line-width -1 :style box) :inherit default)
-    (t :inverse-video t :inherit default))
+  '((t :underline t :inherit default))
   "Face for the current typing-cursor position."
-  :group 'touchtype)
-
-(defface touchtype-face-target
-  '((t :inherit default))
-  "Face for the target text line."
   :group 'touchtype)
 
 (defface touchtype-face-status
