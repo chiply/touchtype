@@ -38,10 +38,12 @@
     ;; Bind all printable ASCII characters (space through tilde)
     (dolist (c (number-sequence 32 126))
       (define-key map (vector c) #'touchtype-ui--handle-char))
-    (define-key map (kbd "DEL")   #'touchtype-ui--handle-backspace)
-    (define-key map (kbd "M-DEL") #'touchtype-ui--handle-word-backspace)
-    (define-key map (kbd "RET")   #'touchtype-ui--ignore-key)
-    (define-key map (kbd "C-g")   #'touchtype-ui--quit)
+    (define-key map (kbd "DEL")           #'touchtype-ui--handle-backspace)
+    (define-key map (kbd "M-DEL")         #'touchtype-ui--handle-word-backspace)
+    (define-key map (kbd "M-<backspace>") #'touchtype-ui--handle-word-backspace)
+    (define-key map (kbd "C-w")           #'touchtype-ui--handle-word-backspace)
+    (define-key map (kbd "RET")           #'touchtype-ui--ignore-key)
+    (define-key map (kbd "C-g")           #'touchtype-ui--quit)
     map)
   "Keymap used in the *touchtype* training buffer.
 Captures all printable keys and routes them to the typing handler.")
@@ -87,13 +89,13 @@ Captures all printable keys and routes them to the typing handler.")
         ;; Keep point anchored to the typing area after every command.
         ;; This prevents Evil (and anything else) from drifting into the
         ;; status line or acting on buffer text directly.
-        (add-hook 'post-command-hook #'touchtype-ui--enforce-point nil t)
-        ;; Put Evil into emacs state for this buffer so it defers entirely
-        ;; to our keymap rather than intercepting keys itself.
-        (when (and (fboundp 'evil-emacs-state)
-                   (bound-and-true-p evil-mode))
-          (evil-emacs-state))))
+        (add-hook 'post-command-hook #'touchtype-ui--enforce-point nil t)))
     (switch-to-buffer buf)
+    ;; Enter Evil's emacs state AFTER switching to the buffer so that
+    ;; Evil's buffer-switch hooks cannot reset the state back to normal.
+    (when (and (fboundp 'evil-emacs-state)
+               (bound-and-true-p evil-mode))
+      (evil-emacs-state))
     (touchtype-ui--render-new-line)))
 
 ;;;; Buffer rendering
