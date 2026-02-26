@@ -83,7 +83,16 @@ Captures all printable keys and routes them to the typing handler.")
               touchtype--typed-chars         nil)
         (use-local-map touchtype-ui--keymap)
         (setq-local cursor-type nil)
-        (setq buffer-read-only t)))
+        (setq buffer-read-only t)
+        ;; Keep point anchored to the typing area after every command.
+        ;; This prevents Evil (and anything else) from drifting into the
+        ;; status line or acting on buffer text directly.
+        (add-hook 'post-command-hook #'touchtype-ui--enforce-point nil t)
+        ;; Put Evil into emacs state for this buffer so it defers entirely
+        ;; to our keymap rather than intercepting keys itself.
+        (when (and (fboundp 'evil-emacs-state)
+                   (bound-and-true-p evil-mode))
+          (evil-emacs-state))))
     (switch-to-buffer buf)
     (touchtype-ui--render-new-line)))
 
@@ -112,11 +121,11 @@ Captures all printable keys and routes them to the typing handler.")
     (let ((n (length text)))
       (setq touchtype--char-overlays (make-vector n nil))
       (dotimes (i n)
-        (let* ((buf-pos (point))
-               (ov      (make-overlay buf-pos (1+ buf-pos))))
+        (let ((buf-pos (point)))
           (insert (aref text i))
-          (overlay-put ov 'face 'touchtype-face-untyped)
-          (aset touchtype--char-overlays i ov))))
+          (let ((ov (make-overlay buf-pos (point))))
+            (overlay-put ov 'face 'touchtype-face-untyped)
+            (aset touchtype--char-overlays i ov)))))
     (insert "\n\n")
     ;; Status line
     (setq touchtype--status-start (point-marker))
@@ -126,7 +135,9 @@ Captures all printable keys and routes them to the typing handler.")
     (touchtype-ui--update-cursor-overlay)))
 
 (defun touchtype-ui--update-cursor-overlay ()
-  "Underline the character at `touchtype--cursor-pos' in the text line."
+  "Underline the character at `touchtype--cursor-pos' in the text line.
+Also moves buffer point to the typing position so Evil and other
+packages render the cursor there rather than at the end of the buffer."
   (when touchtype--cursor-overlay
     (delete-overlay touchtype--cursor-overlay)
     (setq touchtype--cursor-overlay nil))
@@ -137,7 +148,12 @@ Captures all printable keys and routes them to the typing handler.")
              (ov (make-overlay buf-pos (1+ buf-pos))))
         (overlay-put ov 'face 'touchtype-face-cursor)
         (overlay-put ov 'priority 10)
-        (setq touchtype--cursor-overlay ov)))))
+        (setq touchtype--cursor-overlay ov)))
+    ;; Keep buffer point inside the typing area so Evil (and any other
+    ;; mode that uses point for cursor display) doesn't wander elsewhere.
+    (when (and touchtype--target-start (> n 0))
+      (goto-char (+ (marker-position touchtype--target-start)
+                    (min pos (1- n)))))))
 
 (defun touchtype-ui--update-typed-char (pos _char face)
   "Apply FACE to the overlay at POS in the target text.
@@ -187,6 +203,19 @@ _CHAR is accepted for API compatibility but unused."
      (format "  WPM: %s  Accuracy: %s  Mode: %s%s%s"
              wpm acc mode keys words)
      'face 'touchtype-face-status)))
+
+(defun touchtype-ui--enforce-point ()
+  "Buffer-local `post-command-hook': keep point in the typing area.
+Prevents Evil and other packages from moving the cursor into the
+status line or elsewhere after each command."
+  (when (and (bound-and-true-p touchtype--target-start)
+             touchtype--current-text
+             (> (length touchtype--current-text) 0))
+    (let* ((n       (length touchtype--current-text))
+           (pos     (min touchtype--cursor-pos (1- n)))
+           (target  (+ (marker-position touchtype--target-start) pos)))
+      (unless (= (point) target)
+        (goto-char target)))))
 
 ;;;; Input handling
 
