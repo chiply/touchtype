@@ -4,7 +4,6 @@
 
 ;; Author: Charlie Holland <mister.chiply@gmail.com>
 ;; URL: https://github.com/chiply/touchtype
-;; Package-Requires: ((emacs "29.1"))
 
 ;; This file is not part of GNU Emacs.
 

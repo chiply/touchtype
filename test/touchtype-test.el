@@ -1151,13 +1151,13 @@
   "Render-expandable-sections inserts truncated items."
   (with-temp-buffer
     (let ((fmt (lambda (s) (format "  %s\n" s))))
-      (setq-local touchtype--expandable-sections
+      (setq-local touchtype-ui--expandable-sections
                   (list (list :id "test" :header "Test Section"
                               :trunc-items '("alpha" "bravo")
                               :full-items '("alpha" "bravo" "charlie" "delta" "echo")
                               :formatter fmt :is-expanded nil)))
-      (setq-local touchtype--expandable-area-start (copy-marker (point)))
-      (setq-local touchtype--expandable-area-end (copy-marker (point) t))
+      (setq-local touchtype-ui--expandable-area-start (copy-marker (point)))
+      (setq-local touchtype-ui--expandable-area-end (copy-marker (point) t))
       (touchtype-ui--render-expandable-sections)
       ;; Buffer should contain the truncated items
       (should (string-match-p "alpha" (buffer-string)))
@@ -1169,13 +1169,13 @@
   "Section with all items shown has no expand hint."
   (with-temp-buffer
     (let ((fmt (lambda (s) (format "  %s\n" s))))
-      (setq-local touchtype--expandable-sections
+      (setq-local touchtype-ui--expandable-sections
                   (list (list :id "small" :header "Small Section"
                               :trunc-items '("one" "two")
                               :full-items '("one" "two")
                               :formatter fmt :is-expanded nil)))
-      (setq-local touchtype--expandable-area-start (copy-marker (point)))
-      (setq-local touchtype--expandable-area-end (copy-marker (point) t))
+      (setq-local touchtype-ui--expandable-area-start (copy-marker (point)))
+      (setq-local touchtype-ui--expandable-area-end (copy-marker (point) t))
       (touchtype-ui--render-expandable-sections)
       ;; Content should be present
       (should (string-match-p "one" (buffer-string)))
@@ -1186,16 +1186,16 @@
   "Toggling an expandable section shows full content."
   (with-temp-buffer
     (let ((fmt (lambda (s) (format "  %s\n" s))))
-      (setq-local touchtype--expandable-sections
+      (setq-local touchtype-ui--expandable-sections
                   (list (list :id "test" :header "Test Section"
                               :trunc-items '("alpha" "bravo")
                               :full-items '("alpha" "bravo" "charlie" "delta" "echo")
                               :formatter fmt :is-expanded nil)))
-      (setq-local touchtype--expandable-area-start (copy-marker (point)))
-      (setq-local touchtype--expandable-area-end (copy-marker (point) t))
+      (setq-local touchtype-ui--expandable-area-start (copy-marker (point)))
+      (setq-local touchtype-ui--expandable-area-end (copy-marker (point) t))
       (touchtype-ui--render-expandable-sections)
       ;; Toggle to expand
-      (let ((section (car touchtype--expandable-sections)))
+      (let ((section (car touchtype-ui--expandable-sections)))
         (plist-put section :is-expanded t)
         (touchtype-ui--render-expandable-sections))
       ;; Now all items should be visible
@@ -1207,16 +1207,16 @@
   "Toggling an expanded section collapses it back."
   (with-temp-buffer
     (let ((fmt (lambda (s) (format "  %s\n" s))))
-      (setq-local touchtype--expandable-sections
+      (setq-local touchtype-ui--expandable-sections
                   (list (list :id "test" :header "Test Section"
                               :trunc-items '("alpha" "bravo")
                               :full-items '("alpha" "bravo" "charlie" "delta" "echo")
                               :formatter fmt :is-expanded nil)))
-      (setq-local touchtype--expandable-area-start (copy-marker (point)))
-      (setq-local touchtype--expandable-area-end (copy-marker (point) t))
+      (setq-local touchtype-ui--expandable-area-start (copy-marker (point)))
+      (setq-local touchtype-ui--expandable-area-end (copy-marker (point) t))
       (touchtype-ui--render-expandable-sections)
       ;; Expand then collapse
-      (let ((section (car touchtype--expandable-sections)))
+      (let ((section (car touchtype-ui--expandable-sections)))
         (plist-put section :is-expanded t)
         (touchtype-ui--render-expandable-sections)
         (plist-put section :is-expanded nil)
@@ -1252,13 +1252,13 @@
   "Expandable section header includes item count hint."
   (with-temp-buffer
     (let ((fmt (lambda (s) (format "  %s\n" s))))
-      (setq-local touchtype--expandable-sections
+      (setq-local touchtype-ui--expandable-sections
                   (list (list :id "test" :header "Test Section"
                               :trunc-items '("a" "b")
                               :full-items '("a" "b" "c" "d" "e")
                               :formatter fmt :is-expanded nil)))
-      (setq-local touchtype--expandable-area-start (copy-marker (point)))
-      (setq-local touchtype--expandable-area-end (copy-marker (point) t))
+      (setq-local touchtype-ui--expandable-area-start (copy-marker (point)))
+      (setq-local touchtype-ui--expandable-area-end (copy-marker (point) t))
       (touchtype-ui--render-expandable-sections)
       ;; Header should show count
       (should (string-match-p "\\[2 of 5\\]" (buffer-string))))))
