@@ -165,6 +165,99 @@ Returns 0.0 when no data is available."
              (accuracy     (/ (float hits) (+ hits misses))))
         (* accuracy speed-conf)))))
 
+(defun touchtype-stats-get-bigram-confidence (bigram)
+  "Compute confidence score 0.0-1.0 for BIGRAM string.
+Uses the same formula as `touchtype-stats-get-confidence' but
+applied to bigram-stats entries."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((entry  (assoc bigram (plist-get touchtype--stats :bigram-stats)))
+         (hits   (if entry (touchtype-stats--entry-get entry :hits)   0))
+         (misses (if entry (touchtype-stats--entry-get entry :misses) 0)))
+    (if (zerop hits)
+        0.0
+      (let* ((total-ms     (touchtype-stats--entry-get entry :total-ms))
+             (target-ms    (/ 60000.0 (* touchtype-target-wpm 5)))
+             (avg-ms       (/ (float total-ms) hits))
+             (speed-conf   (min 1.0 (/ target-ms avg-ms)))
+             (accuracy     (/ (float hits) (+ hits misses))))
+        (* accuracy speed-conf)))))
+
+(defalias 'touchtype-stats-get-ngram-confidence #'touchtype-stats-get-bigram-confidence
+  "Alias for `touchtype-stats-get-bigram-confidence'.
+Works on any string length since bigram-stats uses `assoc'.")
+
+(defun touchtype-stats-get-weak-bigrams (&optional n)
+  "Return the N weakest bigrams sorted by confidence ascending.
+Only includes bigrams with at least 5 hits.  N defaults to 10."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((n (or n 10))
+         (bstats (plist-get touchtype--stats :bigram-stats))
+         (qualified
+          (cl-remove-if-not
+           (lambda (entry)
+             (>= (touchtype-stats--entry-get entry :hits) 5))
+           bstats))
+         (sorted
+          (sort (copy-sequence qualified)
+                (lambda (a b)
+                  (< (touchtype-stats-get-bigram-confidence (car a))
+                     (touchtype-stats-get-bigram-confidence (car b)))))))
+    (seq-take sorted n)))
+
+(defun touchtype-stats-get-weak-ngrams (min-len max-len &optional n)
+  "Return the N weakest n-grams with string length between MIN-LEN and MAX-LEN.
+Only includes entries with at least 5 hits.  N defaults to 10.
+Sorted by confidence ascending."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((n (or n 10))
+         (bstats (plist-get touchtype--stats :bigram-stats))
+         (qualified
+          (cl-remove-if-not
+           (lambda (entry)
+             (let ((len (length (car entry))))
+               (and (>= len min-len)
+                    (<= len max-len)
+                    (>= (touchtype-stats--entry-get entry :hits) 5))))
+           bstats))
+         (sorted
+          (sort (copy-sequence qualified)
+                (lambda (a b)
+                  (< (touchtype-stats-get-bigram-confidence (car a))
+                     (touchtype-stats-get-bigram-confidence (car b)))))))
+    (seq-take sorted n)))
+
+(defun touchtype-stats-get-wpm-trend (&optional n)
+  "Return the last N session WPM values, oldest first.
+N defaults to `touchtype-stats-history-length'."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((n (or n touchtype-stats-history-length))
+         (sessions (seq-take (plist-get touchtype--stats :sessions) n)))
+    (nreverse (mapcar (lambda (s) (plist-get (cdr s) :wpm)) sessions))))
+
+(defun touchtype-stats-get-accuracy-trend (&optional n)
+  "Return the last N session accuracy values, oldest first.
+N defaults to `touchtype-stats-history-length'."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((n (or n touchtype-stats-history-length))
+         (sessions (seq-take (plist-get touchtype--stats :sessions) n)))
+    (nreverse (mapcar (lambda (s) (plist-get (cdr s) :accuracy)) sessions))))
+
+(defun touchtype-stats-get-trend-direction (values)
+  "Compare first-half vs second-half average of VALUES.
+Return `improving' if second half > first half by >2%,
+`declining' if lower by >2%, or `stable' otherwise."
+  (if (< (length values) 2)
+      'stable
+    (let* ((mid (/ (length values) 2))
+           (first-half (seq-take values mid))
+           (second-half (seq-drop values mid))
+           (avg1 (/ (cl-reduce #'+ first-half) (float (length first-half))))
+           (avg2 (/ (cl-reduce #'+ second-half) (float (length second-half))))
+           (pct-change (if (> avg1 0) (* 100.0 (/ (- avg2 avg1) avg1)) 0.0)))
+      (cond ((> pct-change 2.0)  'improving)
+            ((< pct-change -2.0) 'declining)
+            (t                   'stable)))))
+
 (defun touchtype-stats-get-weak-letters ()
   "Return a list of letters sorted by confidence ascending.
 Letters with no data appear first."
@@ -177,18 +270,21 @@ Letters with no data appear first."
 
 ;;;; Session summary
 
-(defun touchtype-stats-record-session (wpm accuracy mode words)
+(defun touchtype-stats-record-session (wpm accuracy mode words &rest extra)
   "Append a session record to `touchtype--stats'.
-WPM is the session words-per-minute float, ACCURACY is a percentage
-float (0–100), MODE is a symbol, and WORDS is the word count."
+WPM is the net words-per-minute float, ACCURACY is a percentage
+float (0–100), MODE is a symbol, and WORDS is the word count.
+EXTRA is a plist of additional fields (e.g. :gross-wpm, :total-time,
+:total-chars, :corrections, :uncorrected-errors, :consistency)."
   (unless touchtype--stats (touchtype-stats-load))
   (let* ((sessions (plist-get touchtype--stats :sessions))
-         (date (format-time-string "%Y-%m-%d")))
+         (date (format-time-string "%Y-%m-%d"))
+         (record (append (list (intern date)
+                               :wpm wpm :accuracy accuracy
+                               :mode mode :words words)
+                         extra)))
     (plist-put touchtype--stats :sessions
-               (cons (list (intern date)
-                           :wpm wpm :accuracy accuracy
-                           :mode mode :words words)
-                     sessions))))
+               (cons record sessions))))
 
 (defun touchtype-stats-session-summary ()
   "Return a plist of metrics for the most recent session.
@@ -196,6 +292,42 @@ Keys: :wpm, :accuracy, :mode, :words."
   (let ((sessions (plist-get touchtype--stats :sessions)))
     (when sessions
       (cdr (car sessions)))))
+
+;;;; Personal bests
+
+(defun touchtype-stats-get-personal-best (mode metric)
+  "Return the best value of METRIC for MODE across all sessions.
+METRIC is a keyword like :wpm or :accuracy.  Returns nil if no sessions
+for MODE exist."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let ((sessions (plist-get touchtype--stats :sessions))
+        (best nil))
+    (dolist (s sessions)
+      (let ((s-mode (plist-get (cdr s) :mode))
+            (val    (plist-get (cdr s) metric)))
+        (when (and (eq s-mode mode) val
+                   (or (null best) (> val best)))
+          (setq best val))))
+    best))
+
+(defun touchtype-stats-get-all-personal-bests ()
+  "Return an alist of ((MODE . (:wpm N :accuracy N)) ...) for all modes."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let ((sessions (plist-get touchtype--stats :sessions))
+        (bests nil))
+    (dolist (s sessions)
+      (let* ((mode (plist-get (cdr s) :mode))
+             (wpm  (plist-get (cdr s) :wpm))
+             (acc  (plist-get (cdr s) :accuracy))
+             (entry (assq mode bests)))
+        (if entry
+            (progn
+              (when (and wpm (> wpm (or (plist-get (cdr entry) :wpm) 0)))
+                (plist-put (cdr entry) :wpm wpm))
+              (when (and acc (> acc (or (plist-get (cdr entry) :accuracy) 0)))
+                (plist-put (cdr entry) :accuracy acc)))
+          (push (cons mode (list :wpm (or wpm 0) :accuracy (or acc 0))) bests))))
+    bests))
 
 ;;;; Unlock-key persistence
 
@@ -208,6 +340,105 @@ Keys: :wpm, :accuracy, :mode, :words."
   "Persist KEYS string as the current unlocked-keys value."
   (unless touchtype--stats (touchtype-stats-load))
   (plist-put touchtype--stats :unlocked-keys keys))
+
+;;;; Daily streak and total practice time
+
+(defun touchtype-stats-update-streak-and-time (elapsed-seconds)
+  "Update daily streak and total practice time with ELAPSED-SECONDS.
+Call at session end.  Same day: add time, streak unchanged.
+Consecutive day: streak + 1.  Gap: streak resets to 1."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((today (format-time-string "%Y-%m-%d"))
+         (last-date (plist-get touchtype--stats :last-practice-date))
+         (old-streak (or (plist-get touchtype--stats :daily-streak) 0))
+         (old-time (or (plist-get touchtype--stats :total-practice-time) 0)))
+    (plist-put touchtype--stats :total-practice-time
+               (+ old-time elapsed-seconds))
+    (plist-put touchtype--stats :last-practice-date today)
+    (cond
+     ((equal today last-date)
+      ;; Same day, streak unchanged
+      )
+     ((and last-date
+           (equal today
+                  (format-time-string "%Y-%m-%d"
+                    (time-add (date-to-time (concat last-date " 00:00:00"))
+                              (* 24 60 60)))))
+      ;; Consecutive day
+      (plist-put touchtype--stats :daily-streak (1+ old-streak)))
+     (t
+      ;; First day or gap
+      (plist-put touchtype--stats :daily-streak 1)))))
+
+(defun touchtype-stats-get-streak ()
+  "Return the current daily streak count."
+  (unless touchtype--stats (touchtype-stats-load))
+  (or (plist-get touchtype--stats :daily-streak) 0))
+
+(defun touchtype-stats-get-total-practice-time ()
+  "Return total practice time in seconds."
+  (unless touchtype--stats (touchtype-stats-load))
+  (or (plist-get touchtype--stats :total-practice-time) 0))
+
+;;;; Stats export
+
+(defun touchtype-stats-export-json ()
+  "Return stats as a JSON string."
+  (require 'json)
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((sessions (plist-get touchtype--stats :sessions))
+         (letter-stats (plist-get touchtype--stats :letter-stats))
+         (session-list
+          (mapcar (lambda (s)
+                    (let ((plist (cdr s)))
+                      `((date . ,(symbol-name (car s)))
+                        (wpm . ,(plist-get plist :wpm))
+                        (accuracy . ,(plist-get plist :accuracy))
+                        (mode . ,(symbol-name (plist-get plist :mode)))
+                        (words . ,(plist-get plist :words)))))
+                  sessions))
+         (letter-list
+          (mapcar (lambda (entry)
+                    `((letter . ,(string (car entry)))
+                      (hits . ,(plist-get (cdr entry) :hits))
+                      (misses . ,(plist-get (cdr entry) :misses))
+                      (total_ms . ,(plist-get (cdr entry) :total-ms))
+                      (confidence . ,(touchtype-stats-get-confidence (car entry)))))
+                  letter-stats)))
+    (json-encode `((sessions . ,(vconcat session-list))
+                   (letter_stats . ,(vconcat letter-list))
+                   (streak . ,(touchtype-stats-get-streak))
+                   (total_practice_seconds . ,(touchtype-stats-get-total-practice-time))))))
+
+(defun touchtype-stats-export-csv ()
+  "Return session stats as a CSV string with header."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((sessions (plist-get touchtype--stats :sessions))
+         (header "date,wpm,accuracy,mode,words")
+         (rows (mapcar
+                (lambda (s)
+                  (let ((plist (cdr s)))
+                    (format "%s,%.1f,%.1f,%s,%d"
+                            (symbol-name (car s))
+                            (plist-get plist :wpm)
+                            (plist-get plist :accuracy)
+                            (plist-get plist :mode)
+                            (plist-get plist :words))))
+                sessions)))
+    (mapconcat #'identity (cons header rows) "\n")))
+
+(defun touchtype-stats-export (format filename)
+  "Export stats to FILENAME in FORMAT (json or csv)."
+  (interactive
+   (list (intern (completing-read "Format: " '("json" "csv") nil t))
+         (read-file-name "Export to: ")))
+  (let ((content (pcase format
+                   ('json (touchtype-stats-export-json))
+                   ('csv  (touchtype-stats-export-csv))
+                   (_     (error "Unknown format: %s" format)))))
+    (with-temp-file filename
+      (insert content))
+    (message "Stats exported to %s" filename)))
 
 (provide 'touchtype-stats)
 

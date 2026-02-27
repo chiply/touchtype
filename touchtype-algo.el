@@ -29,6 +29,9 @@
 (require 'touchtype-var)
 (require 'touchtype-stats)
 
+(declare-function touchtype-narrative-generate-line "touchtype-narrative")
+(declare-function touchtype-narrative--prepare-passage "touchtype-narrative")
+
 ;;;; Internal helpers
 
 (defun touchtype-algo--weighted-pick (weighted-list allowed)
@@ -61,12 +64,43 @@ Total weight is the sum of all outgoing bigram frequencies for CHAR."
 
 ;;;; Pseudo-word generation
 
+(defun touchtype-algo--effective-word-limits (n-allowed)
+  "Return (MIN-LEN . MAX-LEN) scaled for N-ALLOWED available characters.
+With very few keys, shorter words feel more natural and avoid
+single-character repetition."
+  (cond ((<= n-allowed 3) (cons 2 4))
+        ((<= n-allowed 5) (cons 3 5))
+        (t (cons touchtype-word-length-min touchtype-word-length-max))))
+
+(defun touchtype-algo--random-pick-word (allowed-chars min-len max-len)
+  "Generate a word by randomly picking from ALLOWED-CHARS.
+Length is between MIN-LEN and MAX-LEN.  Avoids repeating the same
+character more than twice in a row."
+  (let* ((len (+ min-len (random (1+ (- max-len min-len)))))
+         (chars (string-to-list allowed-chars))
+         (word nil)
+         (prev nil)
+         (prev2 nil))
+    (dotimes (_ len)
+      (let* ((candidates (if (and prev (eql prev prev2))
+                             (remq prev chars)
+                           chars))
+             (ch (nth (random (length candidates)) candidates)))
+        (push ch word)
+        (setq prev2 prev
+              prev ch)))
+    (apply #'string (nreverse word))))
+
 (defun touchtype-algo-generate-word (allowed-chars &optional focused-char)
   "Generate a pseudo-word using only characters in ALLOWED-CHARS string.
 If FOCUSED-CHAR is non-nil, approximately 40% of generated words are
 guaranteed to contain it.
 
-The algorithm:
+When ALLOWED-CHARS has 4 or fewer characters the bigram table is too
+sparse for natural generation, so a random-pick strategy is used
+instead, with word lengths scaled down to avoid repetitive output.
+
+The bigram algorithm:
 1. Picks a start character weighted by total outgoing bigram frequency.
 2. Iteratively picks the next character from the bigram table, filtered
    to ALLOWED-CHARS.
@@ -75,49 +109,58 @@ The algorithm:
 4. Retries up to 5 times if generation fails.
 
 Returns a string, or nil after 5 failed attempts."
-  (let ((attempt 0)
-        result)
-    (while (and (null result) (< attempt 5))
-      (cl-incf attempt)
-      (let* ((start (touchtype-algo--weighted-pick
-                     (touchtype-algo--unigram-weights allowed-chars)
-                     allowed-chars))
-             (word (when start (list start)))
-             (current start))
-        (when start
-          (cl-block word-gen
-            (while t
-              (let* ((len (length word))
-                     (end-prob
-                      (if (< len touchtype-word-length-min)
-                          0
-                        (min 80
-                             (round (* 10 (expt 1.3
-                                              (- len
-                                                 touchtype-word-length-min)))))))
-                     (force-end (>= len touchtype-word-length-max))
-                     (end-roll (random 100)))
-                (if (or force-end (>= end-roll (- 100 end-prob)))
-                    (cl-return-from word-gen)
-                  (let* ((row (cdr (assq current touchtype--bigram-table)))
-                         (next (touchtype-algo--weighted-pick
-                                row allowed-chars)))
-                    (if (null next)
+  (let* ((n-allowed (length allowed-chars))
+         (limits    (touchtype-algo--effective-word-limits n-allowed))
+         (wmin      (car limits))
+         (wmax      (cdr limits)))
+    ;; Small alphabet: random-pick is more reliable than bigram transitions
+    (if (<= n-allowed 4)
+        (let ((word (touchtype-algo--random-pick-word allowed-chars wmin wmax)))
+          (when (and focused-char
+                     (not (seq-contains-p word focused-char #'=))
+                     (< (random 100) 40))
+            (let ((pos (random (length word))))
+              (aset word pos focused-char)))
+          word)
+      ;; Normal bigram-table generation
+      (let ((attempt 0)
+            result)
+        (while (and (null result) (< attempt 5))
+          (cl-incf attempt)
+          (let* ((start (touchtype-algo--weighted-pick
+                         (touchtype-algo--unigram-weights allowed-chars)
+                         allowed-chars))
+                 (word (when start (list start)))
+                 (current start))
+            (when start
+              (cl-block word-gen
+                (while t
+                  (let* ((len (length word))
+                         (end-prob
+                          (if (< len wmin)
+                              0
+                            (min 80
+                                 (round (* 10 (expt 1.3 (- len wmin)))))))
+                         (force-end (>= len wmax))
+                         (end-roll (random 100)))
+                    (if (or force-end (>= end-roll (- 100 end-prob)))
                         (cl-return-from word-gen)
-                      (push next word)
-                      (setq current next)))))))          ; closes: let*, while, cl-block
-          (when (>= (length word) touchtype-word-length-min)
-            (setq word (nreverse word))
-            (when (and focused-char
-                       (not (memq focused-char word))
-                       (< (random 100) 40))
-              (let ((pos (random (length word))))
-                (setf (nth pos word) focused-char)))    ; closes: let, when(and)
-            (setq result (apply #'string word)))        ; closes: when(>=)
-          )                                             ; closes: when(start)
-        )                                               ; closes: let*(start)
-      )                                                 ; closes: while(attempt)
-    result))                                            ; closes: let, defun
+                      (let* ((row (cdr (assq current touchtype--bigram-table)))
+                             (next (touchtype-algo--weighted-pick
+                                    row allowed-chars)))
+                        (if (null next)
+                            (cl-return-from word-gen)
+                          (push next word)
+                          (setq current next)))))))
+              (when (>= (length word) wmin)
+                (setq word (nreverse word))
+                (when (and focused-char
+                           (not (memq focused-char word))
+                           (< (random 100) 40))
+                  (let ((pos (random (length word))))
+                    (setf (nth pos word) focused-char)))
+                (setq result (apply #'string word))))))
+        result))))                                            ; closes: let, defun
 
 ;;;; Real-word mode
 
@@ -137,25 +180,61 @@ ALLOWED-CHARS; falls back to pseudo-word generation when fewer than
         (nth (random (length valid)) valid)
       (or (touchtype-algo-generate-word allowed-chars) "hello"))))
 
-;;;; Bigram drill
+;;;; N-gram drill
+
+(defun touchtype-algo-ngram-line (ngrams &optional n-repeats)
+  "Return a line of repeated n-grams from NGRAMS list.
+N-REPEATS is the number of repetitions; when nil the function fills
+to ~75 characters.  N-grams containing chars not in
+`touchtype--unlocked-keys' are skipped."
+  (let* ((available
+          (cl-remove-if-not
+           (lambda (ng)
+             (cl-every (lambda (c)
+                         (seq-contains-p touchtype--unlocked-keys c #'=))
+                       ng))
+           ngrams)))
+    (when (null available)
+      (setq available (list (car ngrams))))  ; minimal fallback
+    (let* ((chosen (nth (random (length available)) available))
+           (n (or n-repeats
+                  (max 4 (/ 75 (1+ (length chosen))))))
+           (repeated (cl-loop repeat n collect chosen)))
+      (mapconcat #'identity repeated " "))))
 
 (defun touchtype-algo-bigram-line (&optional n-bigrams)
   "Return a line of repeated bigrams for bigram-drill mode.
-N-BIGRAMS defaults to 10.  Bigrams containing letters not in
-`touchtype--unlocked-keys' are skipped."
-  (let* ((n (or n-bigrams 10))
-         (available
-          (cl-remove-if-not
-           (lambda (bg)
-             (cl-every (lambda (c)
-                         (seq-contains-p touchtype--unlocked-keys c #'=))
-                       bg))
-           touchtype--common-bigrams)))
-    (when (null available)
-      (setq available (list "fs" "jd")))  ; minimal fallback
-    (let* ((chosen (nth (random (length available)) available))
-           (repeated (cl-loop repeat n collect chosen)))
-      (mapconcat #'identity repeated " "))))
+N-BIGRAMS is the repeat count; nil fills to ~75 chars.
+Thin wrapper around `touchtype-algo-ngram-line'."
+  (touchtype-algo-ngram-line touchtype--common-bigrams n-bigrams))
+
+;;;; Passage-based line generation helper
+
+(defun touchtype-algo--generate-line-from-passage (passage-var offset-var)
+  "Generate a line from a passage stored in buffer-local variables.
+PASSAGE-VAR and OFFSET-VAR are symbols naming the passage string
+and offset integer.  Breaks at ~60 chars on a word boundary.
+Returns nil when the passage is exhausted."
+  (let ((passage (symbol-value passage-var))
+        (offset (symbol-value offset-var)))
+    (when (and passage (< offset (length passage)))
+      (let* ((remaining (- (length passage) offset))
+             (target 60))
+        (if (<= remaining target)
+            (prog1 (string-trim (substring passage offset))
+              (set offset-var (length passage)))
+          (let ((break-pos (+ offset target)))
+            (while (and (> break-pos offset)
+                        (not (= (aref passage break-pos) ?\s)))
+              (cl-decf break-pos))
+            (when (= break-pos offset)
+              (setq break-pos (+ offset target))
+              (while (and (< break-pos (length passage))
+                          (not (= (aref passage break-pos) ?\s)))
+                (cl-incf break-pos)))
+            (let ((line (string-trim (substring passage offset break-pos))))
+              (set offset-var (min (length passage) (1+ break-pos)))
+              line)))))))
 
 ;;;; Line generation
 
@@ -165,35 +244,100 @@ N-BIGRAMS defaults to 10.  Bigrams containing letters not in
     ('progressive touchtype--unlocked-keys)
     ('full-words  "abcdefghijklmnopqrstuvwxyz")
     ('bigram-drill touchtype--unlocked-keys)
+    ('trigram-drill touchtype--unlocked-keys)
+    ('tetragram-drill touchtype--unlocked-keys)
+    ('ngram-drill touchtype--unlocked-keys)
     ('letters     "abcdefghijklmnopqrstuvwxyz")
     ('letters+numbers
      (concat "abcdefghijklmnopqrstuvwxyz" touchtype--numbers))
     ('letters+numbers+symbols
      (concat "abcdefghijklmnopqrstuvwxyz"
              touchtype--numbers touchtype--symbols))
+    ('narrative
+     (concat "abcdefghijklmnopqrstuvwxyz"
+             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+             touchtype--numbers touchtype--symbols " "))
+    ('common-words "abcdefghijklmnopqrstuvwxyz")
+    ('custom
+     (if touchtype--custom-passage
+         (let ((chars (delete-dups (string-to-list touchtype--custom-passage))))
+           (apply #'string (cl-remove-if (lambda (c) (= c ?\s)) chars)))
+       "abcdefghijklmnopqrstuvwxyz"))
+    ('code
+     (apply #'string (number-sequence 32 126)))
     (_ touchtype--unlocked-keys)))
 
 (defun touchtype-algo-generate-line ()
   "Generate a full line of text for the current mode.
-The line targets ~40 characters and is space-separated words."
-  (if (eq touchtype-mode-selection 'bigram-drill)
-      (touchtype-algo-bigram-line 8)
+The line targets ~75 characters and is space-separated words."
+  (cond
+   ((eq touchtype-mode-selection 'bigram-drill)
+    (touchtype-algo-bigram-line))
+   ((eq touchtype-mode-selection 'trigram-drill)
+    (touchtype-algo-ngram-line touchtype--common-trigrams))
+   ((eq touchtype-mode-selection 'tetragram-drill)
+    (touchtype-algo-ngram-line touchtype--common-tetragrams))
+   ((eq touchtype-mode-selection 'ngram-drill)
+    (let ((lists (list touchtype--common-bigrams
+                       touchtype--common-trigrams
+                       touchtype--common-tetragrams)))
+      (touchtype-algo-ngram-line (nth (random 3) lists))))
+   ((eq touchtype-mode-selection 'narrative)
+    (or (touchtype-narrative-generate-line)
+        (progn
+          (touchtype-narrative--prepare-passage)
+          (touchtype-narrative-generate-line))))
+   ((eq touchtype-mode-selection 'custom)
+    (touchtype-algo--generate-line-from-passage
+     'touchtype--custom-passage 'touchtype--custom-offset))
+   ((eq touchtype-mode-selection 'common-words)
+    (let* ((n (min touchtype-common-words-count
+                   (length touchtype--builtin-words)))
+           (words '())
+           (total-len 0))
+      (while (< total-len 70)
+        (let ((w (aref touchtype--builtin-words (random n))))
+          (push w words)
+          (cl-incf total-len (1+ (length w)))))
+      (mapconcat #'identity (nreverse words) " ")))
+   ((eq touchtype-mode-selection 'code)
+    (let* ((n (length touchtype--code-snippets))
+           (snippets '())
+           (total-len 0))
+      (while (< total-len 60)
+        (let ((s (aref touchtype--code-snippets (random n))))
+          (push s snippets)
+          (cl-incf total-len (+ 2 (length s)))))
+      (mapconcat #'identity (nreverse snippets) "  ")))
+   (t
     (let* ((allowed (touchtype-algo--allowed-for-mode))
            (words '())
            (total-len 0)
-           (pick-fn (if (eq touchtype-mode-selection 'full-words)
+           (focus-char (if (eq touchtype-mode-selection 'progressive)
+                           (touchtype-algo--pick-focus-char)
+                         touchtype--focused-key))
+           (pick-fn (if (memq touchtype-mode-selection '(full-words))
                         (lambda () (touchtype-algo-pick-word allowed))
                       (lambda ()
-                        (touchtype-algo-generate-word
-                         allowed touchtype--focused-key)))))
-      (while (< total-len 35)
+                        (touchtype-algo-generate-word allowed focus-char)))))
+      (while (< total-len 70)
         (let ((w (funcall pick-fn)))
           (when w
             (push w words)
             (cl-incf total-len (1+ (length w))))))
-      (mapconcat #'identity (nreverse words) " "))))
+      (mapconcat #'identity (nreverse words) " ")))))
 
 ;;;; Key unlock logic
+
+(defun touchtype-algo--unlock-order ()
+  "Return the unlock order string for the current keyboard layout."
+  (pcase touchtype-keyboard-layout
+    ('qwerty  touchtype--qwerty-unlock-order)
+    ('dvorak  touchtype--dvorak-unlock-order)
+    ('colemak touchtype--colemak-unlock-order)
+    ('workman touchtype--workman-unlock-order)
+    ('custom  (or touchtype-custom-unlock-order touchtype--qwerty-unlock-order))
+    (_        touchtype--qwerty-unlock-order)))
 
 (defun touchtype-algo-should-unlock-p ()
   "Return non-nil if all currently unlocked keys meet the confidence threshold.
@@ -205,11 +349,11 @@ Checks every character in `touchtype--unlocked-keys' against
             (string-to-list touchtype--unlocked-keys)))
 
 (defun touchtype-algo-unlock-next-key ()
-  "Unlock the next key from `touchtype--qwerty-unlock-order'.
+  "Unlock the next key from the current layout's unlock order.
 Updates `touchtype--unlocked-keys' and sets `touchtype--focused-key'.
 Returns the newly unlocked character, or nil if all keys are already
 unlocked."
-  (let* ((order touchtype--qwerty-unlock-order)
+  (let* ((order (touchtype-algo--unlock-order))
          (next (cl-find-if-not
                 (lambda (ch)
                   (seq-contains-p touchtype--unlocked-keys ch #'=))
@@ -220,6 +364,26 @@ unlocked."
       (touchtype-stats-set-unlocked-keys touchtype--unlocked-keys)
       (setq touchtype--focused-key next)
       next)))
+
+;;;; Weak-letter repetition
+
+(defun touchtype-algo--pick-focus-char ()
+  "Pick a focus character for progressive mode word generation.
+70% chance: return `touchtype--focused-key' (newest unlock).
+30% chance: return a random weak letter below threshold from the
+unlocked set.  Returns nil if no focus is warranted."
+  (if (null touchtype--focused-key)
+      nil
+    (if (< (random 100) 70)
+        touchtype--focused-key
+      (let* ((weak (cl-remove-if
+                    (lambda (ch)
+                      (>= (touchtype-stats-get-confidence ch)
+                          touchtype-unlock-threshold))
+                    (string-to-list touchtype--unlocked-keys))))
+        (if weak
+            (nth (random (length weak)) weak)
+          touchtype--focused-key)))))
 
 (provide 'touchtype-algo)
 

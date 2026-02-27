@@ -56,16 +56,36 @@
   :type 'integer
   :group 'touchtype)
 
+(defcustom touchtype-session-length-presets
+  '((short . 15) (medium . 30) (long . 60) (marathon . 120))
+  "Alist mapping preset names to word counts for session length.
+Used by `touchtype-set-session-length'."
+  :type '(alist :key-type symbol :value-type integer)
+  :group 'touchtype)
+
 (defcustom touchtype-mode-selection 'progressive
   "Current training mode symbol.
 One of: `progressive', `full-words', `bigram-drill', `letters',
-`letters+numbers', or `letters+numbers+symbols'."
+`letters+numbers', `letters+numbers+symbols', `common-words',
+`custom', or `code'."
   :type '(choice (const :tag "Progressive" progressive)
                  (const :tag "Full Words" full-words)
                  (const :tag "Bigram Drill" bigram-drill)
+                 (const :tag "Trigram Drill" trigram-drill)
+                 (const :tag "Tetragram Drill" tetragram-drill)
+                 (const :tag "N-gram Drill" ngram-drill)
                  (const :tag "Letters" letters)
                  (const :tag "Letters+Numbers" letters+numbers)
-                 (const :tag "Letters+Numbers+Symbols" letters+numbers+symbols))
+                 (const :tag "Letters+Numbers+Symbols" letters+numbers+symbols)
+                 (const :tag "Narrative" narrative)
+                 (const :tag "Common Words" common-words)
+                 (const :tag "Custom Text" custom)
+                 (const :tag "Code" code))
+  :group 'touchtype)
+
+(defcustom touchtype-stats-history-length 20
+  "Number of recent sessions to display in the statistics view."
+  :type 'integer
   :group 'touchtype)
 
 (defcustom touchtype-word-length-min 4
@@ -78,6 +98,62 @@ One of: `progressive', `full-words', `bigram-drill', `letters',
   :type 'integer
   :group 'touchtype)
 
+(defcustom touchtype-keyboard-layout 'qwerty
+  "Keyboard layout determining the progressive unlock order."
+  :type '(choice (const :tag "QWERTY" qwerty)
+                 (const :tag "Dvorak" dvorak)
+                 (const :tag "Colemak" colemak)
+                 (const :tag "Workman" workman)
+                 (const :tag "Custom" custom))
+  :group 'touchtype)
+
+(defcustom touchtype-custom-unlock-order nil
+  "Custom key unlock order string when `touchtype-keyboard-layout' is `custom'."
+  :type '(choice (const nil) string)
+  :group 'touchtype)
+
+(defcustom touchtype-common-words-count 100
+  "Number of top common words to use in `common-words' mode."
+  :type 'integer
+  :group 'touchtype)
+
+(defcustom touchtype-session-type 'words
+  "Session type: `words' (fixed word count) or `timed' (fixed duration)."
+  :type '(choice (const :tag "Words" words)
+                 (const :tag "Timed" timed))
+  :group 'touchtype)
+
+(defcustom touchtype-session-duration 60
+  "Duration in seconds for timed sessions."
+  :type 'integer
+  :group 'touchtype)
+
+(defcustom touchtype-error-mode 'normal
+  "Error handling mode.
+`normal': errors shown but typing continues.
+`letter': must type correct letter before advancing.
+`word': must fix errors before crossing word boundaries."
+  :type '(choice (const :tag "Normal" normal)
+                 (const :tag "Stop on Letter" letter)
+                 (const :tag "Stop on Word" word))
+  :group 'touchtype)
+
+(defcustom touchtype-idle-threshold 10
+  "Seconds of inactivity before a pause is excluded from WPM calculation."
+  :type 'integer
+  :group 'touchtype)
+
+(defcustom touchtype-preview-lines 2
+  "Number of upcoming lines to preview below the active line.
+Set to 0 to disable preview."
+  :type 'integer
+  :group 'touchtype)
+
+(defcustom touchtype-pace-caret nil
+  "When non-nil, show a pace caret moving at `touchtype-target-wpm'."
+  :type 'boolean
+  :group 'touchtype)
+
 ;;;; Faces
 
 (defface touchtype-face-untyped
@@ -86,13 +162,22 @@ One of: `progressive', `full-words', `bigram-drill', `letters',
   :group 'touchtype)
 
 (defface touchtype-face-correct
-  '((t :inherit default))
-  "Face for correctly typed characters (normal foreground color)."
+  '((((class color) (background dark))
+     :foreground "#a855f7" :weight bold)
+    (((class color) (background light))
+     :foreground "#7c3aed" :weight bold)
+    (t :foreground "purple" :weight bold))
+  "Face for correctly typed characters."
   :group 'touchtype)
 
 (defface touchtype-face-wrong
-  '((t :foreground "red"))
-  "Face for incorrectly typed characters."
+  '((((class color) (background dark))
+     :foreground "red" :background "#4a1010")
+    (((class color) (background light))
+     :foreground "red" :background "#ffe0e0")
+    (t :foreground "red"))
+  "Face for incorrectly typed characters.
+Includes a background so mistyped spaces are visible."
   :group 'touchtype)
 
 (defface touchtype-face-cursor
@@ -105,6 +190,15 @@ One of: `progressive', `full-words', `bigram-drill', `letters',
   "Face for the status line at the bottom of the touchtype buffer."
   :group 'touchtype)
 
+(defface touchtype-face-pace-caret
+  '((((class color) (background dark))
+     :background "#333333")
+    (((class color) (background light))
+     :background "#e0e0e0")
+    (t :inverse-video t))
+  "Face for the pace caret overlay."
+  :group 'touchtype)
+
 ;;;; Constants
 
 (defconst touchtype--qwerty-unlock-order
@@ -112,6 +206,18 @@ One of: `progressive', `full-words', `bigram-drill', `letters',
   "Order in which keys are progressively unlocked.
 Home-row index/middle/ring/pinky keys first, then by English
 letter frequency.  All 26 lower-case letters are represented.")
+
+(defconst touchtype--dvorak-unlock-order
+  "uhetonasidrljgcmfpbkwvyxqz"
+  "Dvorak layout progressive unlock order.")
+
+(defconst touchtype--colemak-unlock-order
+  "neiostahrdlufywpgmcbkvxjqz"
+  "Colemak layout progressive unlock order.")
+
+(defconst touchtype--workman-unlock-order
+  "nehtosaidrljgcmfpbkwvyxqz"
+  "Workman layout progressive unlock order.")
 
 (defconst touchtype--numbers "0123456789"
   "Digit characters available in letters+numbers modes.")
@@ -203,119 +309,664 @@ pseudo-words.")
 (defconst touchtype--common-bigrams
   '("th" "he" "in" "er" "an" "re" "on" "en" "at" "es"
     "ed" "te" "ti" "or" "st" "ar" "nd" "to" "nt" "is"
-    "of" "it" "al" "as" "ha" "hi" "ng" "se" "ou" "le")
-  "Ordered list of the 30 most common English bigrams.
+    "of" "it" "al" "as" "ha" "hi" "ng" "se" "ou" "le"
+    "me" "de" "no" "ne" "ea" "ri" "ro" "li" "co" "ve"
+    "el" "ra" "ce" "la" "di" "si" "us" "ta" "lo" "ut"
+    "ma" "pe" "ic" "na" "ur" "ni" "ge" "ho" "io" "ac"
+    "il" "be" "ca" "ch" "da" "do" "em" "et" "fi" "fo"
+    "id" "ig" "im" "ke" "ki" "mo" "oc" "ol" "op" "ow"
+    "pa" "pl" "po" "pr" "sa" "sh" "so" "sp" "su" "tr"
+    "tu" "un" "up" "wa" "we" "wi" "wo" "ye" "ab" "ad")
+  "Ordered list of the 100 most common English bigrams.
 Used by `touchtype-algo-bigram-line' for bigram-drill mode.")
+
+(defconst touchtype--common-trigrams
+  '("the" "and" "ing" "her" "hat" "his" "tha" "ere" "for" "ent"
+    "ion" "ter" "was" "you" "ith" "ver" "all" "wit" "thi" "tio"
+    "not" "are" "but" "had" "out" "one" "our" "hou" "rea" "str"
+    "ate" "igh" "hen" "ome" "man" "hin" "ons" "ive" "ove" "ine"
+    "con" "men" "ght" "est" "sto" "ill" "nte" "ati" "ear" "com"
+    "sta" "ted" "res" "int" "pro" "ess" "ave" "per" "nce" "oun"
+    "ste" "ort" "ect" "lin" "tur" "eve" "whe" "rom" "ant" "ard"
+    "rin" "nal" "ble" "ace" "use" "eri" "ber" "cal" "ore" "din"
+    "ran" "nde" "ake" "ide" "ame" "ven" "ree" "min" "kin" "les"
+    "ple" "end" "ren" "als" "ity" "age" "ger" "led" "ial" "ous")
+  "Ordered list of the 100 most common English trigrams.
+Used by `touchtype-algo-ngram-line' for trigram-drill mode.")
+
+(defconst touchtype--common-tetragrams
+  '("that" "ther" "with" "tion" "here" "ould" "ight" "have" "hich" "whic"
+    "this" "thin" "they" "atio" "ever" "from" "ough" "were" "hing" "ment"
+    "them" "ness" "ance" "some" "ally" "over" "ence" "ined" "been" "fore"
+    "able" "ated" "ting" "ture" "ical" "ious" "eral" "ving" "lled" "ents"
+    "ring" "ling" "ning" "ster" "ered" "ople" "heir" "ount" "east" "irst"
+    "nter" "ings" "nder" "ress" "come" "will" "like" "more" "than" "when"
+    "each" "know" "just" "only" "take" "into" "year" "back" "also" "work"
+    "long" "much" "such" "hand" "high" "keep" "last" "most" "made" "good"
+    "give" "very" "need" "tell" "call" "said" "part" "time" "upon" "many"
+    "well" "down" "even" "must" "does" "kind" "same" "find" "help" "turn")
+  "Ordered list of the 100 most common English tetragrams.
+Used by `touchtype-algo-ngram-line' for tetragram-drill mode.")
+
+(defconst touchtype--code-snippets
+  ["def main():" "return None" "if x > 0:" "for i in range(n):"
+   "while True:" "import os" "class Foo:" "self.value = x"
+   "fn main() {" "let mut v = Vec::new();" "match x {" "impl Trait for S {"
+   "pub fn new() -> Self {" "println!(\"hello\");" "Ok(())"
+   "func main() {" "if err != nil {" "fmt.Println(x)" "go func() {"
+   "defer f.Close()" "const x = 42;" "let arr = [1, 2, 3];"
+   "console.log(x);" "async function f() {" "return new Promise();"
+   "export default {" "(defun foo (x)" "(let ((a 1)))" "(setq x 42)"
+   "(lambda (x) (* x x))" "#!/bin/bash" "if [ -f $1 ]; then"
+   "echo \"$HOME\"" "grep -r 'TODO'" "SELECT * FROM users;"
+   "INSERT INTO t (a, b)" "CREATE TABLE t (" "WHERE id = $1"
+   "int main() {" "printf(\"%d\\n\", x);" "#include <stdio.h>"
+   "struct Node {" "void *ptr = NULL;"]
+  "Vector of common code snippets for `code' typing mode.")
 
 (defconst touchtype--builtin-words
   (vconcat
-   ["the" "be" "to" "of" "and" "in" "that" "have" "it" "for"
-    "not" "on" "with" "he" "as" "you" "do" "at" "this" "but"
-    "his" "by" "from" "they" "we" "say" "her" "she" "or" "an"
-    "will" "my" "one" "all" "would" "there" "their" "what" "so"
-    "up" "out" "if" "about" "who" "get" "which" "go" "me" "when"
-    "make" "can" "like" "time" "no" "just" "him" "know" "take"
-    "people" "into" "year" "your" "good" "some" "could" "them"
-    "see" "other" "than" "then" "now" "look" "only" "come" "over"
-    "think" "also" "back" "after" "use" "two" "how" "our" "work"
-    "first" "well" "way" "even" "new" "want" "any" "these" "give"
-    "day" "most" "us" "great" "need" "large" "often" "hand" "high"
-    "place" "hold" "turn" "here" "why" "ask" "went" "read" "land"
-    "form" "end" "does" "another" "those" "found" "both" "same"
-    "tell" "every" "near" "run" "small" "number" "off" "always"
-    "move" "point" "play" "away" "call" "few" "got" "part" "big"
-    "change" "world" "home" "city" "right" "tree" "start" "plant"
-    "night" "feet" "story" "life" "light" "earth" "eyes" "water"
-    "name" "boy" "follow" "came" "show" "around" "air" "kind"
-    "live" "still" "man" "long" "much" "word" "help" "each"
-    "answer" "open" "seem" "learn" "far" "sit" "north" "music"
-    "page" "draw" "yet" "while" "did" "many" "until" "side"
-    "stop" "food" "keep" "face" "seen" "again" "miss" "hard"
-    "river" "car" "care" "second" "book" "carry" "took" "eat"
-    "room" "friend" "began" "idea" "fish" "once" "base" "hear"
-    "horse" "cut" "sure" "watch" "color" "main" "enough" "girl"
-    "ready" "above" "ever" "red" "list" "though" "feel" "talk"
-    "bird" "soon" "body" "dog" "family" "leave" "song" "door"
-    "black" "short" "class" "wind" "question" "happen" "ship"
-    "area" "half" "rock" "order" "fire" "south" "piece" "told"
-    "knew" "pass" "since" "top" "whole" "king" "space" "heard"
-    "best" "hour" "better" "during" "five" "step" "early" "west"
-    "ground" "reach" "fast" "sing" "six" "table" "travel" "less"
-    "morning" "ten" "simple" "toward" "war" "lay" "against" "slow"
-    "center" "love" "money" "road" "map" "rain" "rule" "pull"
-    "cold" "voice" "power" "town" "drive" "dark" "note" "wait"
-    "plan" "star" "field" "rest" "done" "front" "teach" "week"
-    "gave" "green" "ocean" "warm" "free" "minute" "strong" "mind"
-    "clear" "fact" "street" "course" "stay" "wheel" "full" "force"
-    "blue" "surface" "deep" "moon" "island" "foot" "system" "test"
-    "record" "boat" "common" "gold" "plane" "dry" "wonder" "laugh"
-    "thousand" "ago" "ran" "check" "game" "shape" "hot" "brought"
-    "heat" "snow" "fill" "east" "paint" "among" "ball" "wave"
-    "drop" "heart" "present" "heavy" "dance" "engine" "arm" "wide"
-    "sail" "settle" "speak" "weight" "ice" "matter" "circle"
-    "pair" "include" "divide" "felt" "pick" "count" "square"
-    "reason" "art" "energy" "hunt" "bed" "brother" "egg" "ride"
-    "cell" "forest" "window" "store" "summer" "train" "sleep"
-    "prove" "leg" "wall" "catch" "wish" "sky" "board" "joy"
-    "winter" "sat" "wild" "glass" "grass" "cow" "job" "edge"
-    "sign" "visit" "past" "soft" "bright" "gas" "weather" "month"
-    "bear" "finish" "flower" "strange" "trade" "trip" "office"
-    "row" "mouth" "exact" "symbol" "die" "least" "trouble" "shout"
-    "except" "wrote" "seed" "tone" "join" "clean" "break" "lady"
-    "yard" "rise" "bad" "blow" "blood" "touch" "grew" "cent" "mix"
-    "team" "wire" "cost" "lost" "brown" "wear" "garden" "equal"
-    "sent" "choose" "fell" "fit" "flow" "fair" "bank" "collect"
-    "save" "control" "gentle" "woman" "captain" "practice" "doctor"
-    "please" "protect" "noon" "locate" "ring" "insect" "caught"
-    "period" "radio" "spoke" "atom" "human" "history" "expect"
-    "crop" "modern" "element" "student" "corner" "party" "supply"
-    "bone" "rail" "imagine" "provide" "agree" "chair" "danger"
-    "fruit" "rich" "thick" "soldier" "process" "operate" "guess"
-    "sharp" "wing" "create" "wash" "bat" "crowd" "corn" "compare"
-    "poem" "string" "bell" "depend" "meat" "tube" "famous" "dollar"
-    "stream" "fear" "sight" "thin" "planet" "hurry" "clock" "mine"
-    "enter" "major" "fresh" "search" "send" "yellow" "allow"
-    "print" "dead" "spot" "suit" "current" "lift" "rose" "block"
-    "chart" "hat" "sell" "company" "deal" "swim" "term" "wife"
-    "shoe" "camp" "cotton" "born" "truck" "level" "chance" "gather"
-    "shop" "throw" "shine" "column" "select" "wrong" "repeat"
-    "broad" "salt" "nose" "anger" "claim" "value" "result"
-    "able" "about" "above" "across" "after" "again" "age" "agree"
-    "air" "allow" "also" "always" "among" "area" "arise" "ask"
-    "back" "ball" "band" "base" "bear" "beat" "begin" "behind"
-    "believe" "below" "best" "better" "between" "big" "black"
-    "blue" "board" "body" "book" "born" "break" "bring" "broad"
-    "build" "burn" "call" "came" "carry" "case" "cause" "center"
-    "change" "charge" "child" "circle" "city" "claim" "class"
-    "clear" "close" "cold" "collect" "come" "compare" "complete"
-    "contain" "control" "copy" "correct" "cost" "country" "cover"
-    "create" "cross" "cut" "dark" "deal" "deep" "describe"
-    "develop" "differ" "direct" "discover" "double" "draw" "dream"
-    "drive" "drop" "early" "east" "effect" "else" "energy" "enjoy"
-    "enter" "equal" "even" "event" "every" "exact" "fall" "fast"
-    "fear" "feel" "figure" "fill" "find" "fish" "fit" "flow"
-    "flower" "follow" "force" "form" "free" "full" "gain" "general"
-    "give" "glass" "gold" "good" "green" "grow" "hand" "head"
-    "heart" "high" "hold" "home" "hope" "horse" "idea" "inch"
-    "island" "keep" "kind" "land" "large" "last" "learn" "less"
-    "letter" "level" "lift" "line" "list" "live" "long" "look"
-    "love" "main" "map" "matter" "mean" "meet" "mind" "miss"
-    "month" "moon" "more" "most" "mountain" "move" "much" "near"
-    "never" "next" "north" "note" "now" "object" "often" "only"
-    "open" "order" "other" "over" "own" "paint" "pass" "past"
-    "peace" "pick" "place" "plain" "plan" "play" "point" "power"
-    "push" "quick" "quiet" "reach" "real" "reason" "rest" "rich"
-    "right" "rise" "road" "rule" "safe" "same" "seem" "send"
-    "serve" "seven" "show" "sign" "size" "sky" "slow" "small"
-    "sound" "south" "speak" "spend" "start" "stay" "stop" "story"
-    "strong" "such" "sure" "take" "talk" "teach" "than" "think"
-    "together" "too" "town" "travel" "tree" "true" "turn" "under"
-    "until" "use" "very" "visit" "voice" "walk" "want" "warm"
-    "wave" "well" "west" "wild" "wind" "wish" "wood" "write"
-    "young"])
-  "Vector of ~500 common English words for `full-words' mode.
-Words are selected for variety of letter patterns and are
-suitable for typing practice.")
+   ;; ~~~ 2-3 letter words (312 words) ~~~
+   ["act" "add" "age" "ago" "aid" "aim" "air" "all" "an" "and" "any" "ape"
+    "arc" "arm" "art" "as" "ash" "ask" "at" "awe" "axe" "bag" "ban" "bat"
+    "bay" "be" "bed" "bee" "bid" "big" "bin" "bit" "bog" "bow" "box" "boy"
+    "bud" "bug" "bun" "bus" "but" "by" "cab" "cam" "cap" "cod" "cog" "cow"
+    "coy" "cub" "cud" "cup" "cur" "cut" "dab" "dam" "day" "den" "dew" "did"
+    "die" "dig" "dim" "din" "dip" "do" "doe" "dog" "don" "dot" "dry" "dub"
+    "due" "dug" "duo" "dye" "ear" "eat" "eel" "egg" "ego" "elf" "elm" "end"
+    "era" "eve" "eye" "fad" "fan" "far" "fed" "few" "fig" "fin" "fit" "foe"
+    "fog" "for" "fox" "fry" "fur" "gag" "gap" "gas" "gel" "gem" "get" "gig"
+    "gin" "gnu" "go" "gob" "god" "got" "gum" "gut" "gym" "had" "ham" "has"
+    "hay" "he" "hem" "hen" "her" "hew" "hex" "hid" "him" "hip" "his" "hit"
+    "hob" "hog" "hop" "hot" "how" "hub" "hue" "hug" "hum" "hut" "ice" "if"
+    "in" "ink" "inn" "it" "its" "ivy" "jab" "jam" "jar" "jaw" "jet" "job"
+    "joy" "jug" "kit" "lab" "lap" "lay" "led" "let" "lid" "lip" "lit" "log"
+    "lot" "low" "mad" "man" "map" "mat" "may" "me" "mix" "mob" "mop" "mud"
+    "mug" "my" "nap" "net" "new" "nip" "no" "nod" "nor" "not" "now" "nun"
+    "nut" "oak" "oat" "odd" "of" "off" "oil" "old" "on" "one" "or" "ore" "our"
+    "out" "owl" "own" "pad" "pan" "pat" "paw" "peg" "pen" "per" "pet" "pig"
+    "pin" "pit" "pod" "pop" "pot" "pub" "pun" "pup" "put" "rag" "ram" "ran"
+    "rap" "rat" "raw" "red" "rib" "rid" "rig" "rim" "rip" "rob" "rod" "rot"
+    "row" "rub" "rug" "run" "rut" "sap" "saw" "say" "sea" "see" "set" "she"
+    "sit" "sky" "so" "sob" "sod" "son" "sow" "spy" "sum" "sun" "tab" "tan"
+    "tap" "tar" "tax" "ten" "the" "tin" "tip" "to" "too" "top" "tow" "toy"
+    "try" "tub" "tug" "two" "up" "urn" "us" "use" "van" "vat" "vet" "via"
+    "vow" "wag" "war" "way" "we" "web" "wed" "who" "why" "wig" "win" "wit"
+    "woe" "wok" "won" "woo" "yam" "yet" "you" "zap" "zen" "zip" "zoo"]
+   ;; ~~~ 4-5 letter words (1256 words) ~~~
+   ["abort" "above" "adapt" "admit" "adopt" "adult" "after" "again" "alarm"
+    "album" "alien" "align" "alone" "also" "alter" "amid" "ample" "angel"
+    "anger" "ankle" "annex" "anvil" "apple" "arch" "area" "arena" "argue"
+    "arise" "asset" "atlas" "attic" "avian" "avoid" "award" "away" "back"
+    "bacon" "badge" "bald" "bale" "ball" "band" "barb" "barn" "base" "basin"
+    "bask" "batch" "bead" "bear" "beef" "been" "began" "begin" "being" "below"
+    "bench" "berry" "best" "bind" "bird" "birth" "bite" "black" "blade"
+    "blame" "blank" "blast" "blaze" "bleed" "blend" "bless" "blind" "blink"
+    "bliss" "block" "bloom" "blot" "blown" "blue" "blunt" "blur" "blush"
+    "board" "boast" "boat" "body" "bolt" "bone" "bonus" "book" "booth" "born"
+    "bound" "bowl" "brace" "brain" "brand" "brass" "brave" "bread" "break"
+    "breed" "brew" "brick" "brief" "brim" "bring" "broad" "brood" "brook"
+    "brown" "brush" "buck" "build" "bulk" "bump" "bunch" "burst" "bury"
+    "buyer" "cabin" "cable" "call" "calm" "candy" "cane" "cape" "care" "cargo"
+    "carry" "cash" "catch" "cause" "cave" "cease" "cell" "chain" "chair"
+    "chalk" "chant" "chaos" "charm" "chart" "chase" "cheap" "check" "cheek"
+    "cheer" "chess" "chest" "chew" "chief" "child" "chili" "chill" "choir"
+    "chop" "chunk" "cigar" "city" "civic" "civil" "claim" "clam" "clan"
+    "clash" "clasp" "class" "claw" "clay" "clean" "clear" "clerk" "cliff"
+    "climb" "cling" "clip" "clock" "clone" "close" "cloth" "cloud" "clown"
+    "cluck" "coach" "coal" "coast" "coil" "cold" "colon" "color" "come"
+    "comma" "cool" "coral" "cord" "core" "cost" "could" "count" "court" "cove"
+    "cover" "crack" "craft" "cram" "crash" "crawl" "crazy" "cream" "creek"
+    "crest" "crime" "crisp" "crop" "cross" "crow" "crowd" "crown" "crude"
+    "cruel" "crush" "cubic" "curl" "curry" "curve" "cycle" "daily" "dairy"
+    "damp" "dance" "dare" "dark" "data" "dawn" "deal" "dealt" "death" "debt"
+    "debug" "decay" "deck" "deep" "demon" "dense" "dent" "depot" "depth"
+    "detox" "devil" "dine" "dirt" "dirty" "dive" "dock" "done" "donor" "door"
+    "dose" "dote" "doubt" "dough" "draft" "drag" "drain" "drama" "drank"
+    "drape" "draw" "drawl" "dream" "dress" "dried" "drift" "drill" "drink"
+    "drive" "droit" "drone" "drop" "drops" "drove" "drum" "drunk" "dryer"
+    "dull" "dusk" "dust" "duty" "dwarf" "dwell" "dying" "each" "eager" "early"
+    "earn" "earth" "edge" "eight" "elect" "elite" "empty" "enemy" "enjoy"
+    "enter" "equal" "equip" "erase" "error" "essay" "etch" "ethic" "evade"
+    "even" "event" "ever" "every" "exact" "exalt" "exile" "exist" "extra"
+    "fable" "face" "facet" "fade" "faint" "fairy" "faith" "false" "fancy"
+    "farm" "fault" "favor" "feast" "feel" "fell" "fence" "fern" "ferry"
+    "fetch" "fever" "fiber" "field" "fiery" "fifty" "fight" "fill" "filth"
+    "final" "find" "fire" "first" "fish" "fist" "five" "flame" "flank" "flare"
+    "flash" "flask" "flat" "fleet" "flesh" "flick" "fling" "flint" "flip"
+    "float" "flock" "flood" "floor" "flora" "flour" "flow" "flown" "fluid"
+    "fluke" "flute" "flux" "foam" "focus" "food" "fool" "foot" "force" "forge"
+    "form" "forth" "forum" "foul" "found" "fowl" "frame" "frank" "fraud"
+    "free" "fresh" "frog" "from" "front" "frost" "frown" "froze" "fruit"
+    "full" "fume" "funny" "gain" "gait" "game" "gang" "gaze" "giant" "gift"
+    "girl" "give" "given" "gland" "glare" "glass" "gleam" "glen" "glide"
+    "glob" "globe" "gloom" "glory" "gloss" "glove" "glow" "glue" "glum"
+    "going" "gold" "gone" "good" "goose" "gorge" "grab" "grace" "grade"
+    "grain" "grand" "grant" "graph" "grasp" "grass" "grate" "grave" "gravy"
+    "graze" "great" "greed" "green" "greet" "grew" "grid" "grief" "grill"
+    "grim" "grind" "grit" "groan" "groom" "gross" "group" "grove" "growl"
+    "grown" "guard" "guess" "guest" "guide" "guild" "guilt" "guise" "gust"
+    "habit" "half" "halt" "hand" "hard" "harm" "harsh" "haste" "hatch" "haul"
+    "haunt" "have" "haven" "haze" "head" "heal" "hear" "heart" "heavy" "hedge"
+    "heist" "help" "hemp" "herb" "herd" "here" "heron" "high" "hint" "hold"
+    "home" "honor" "hook" "hope" "horse" "hose" "hotel" "house" "hover"
+    "human" "humor" "hump" "hurl" "hurry" "hush" "idea" "image" "imply"
+    "index" "inner" "input" "into" "iron" "itch" "ivory" "jail" "jest" "jewel"
+    "joint" "joker" "jolt" "judge" "juice" "juicy" "just" "keen" "keep" "kind"
+    "king" "knee" "knit" "knock" "knot" "know" "known" "label" "labor" "lake"
+    "lamb" "lance" "land" "large" "laser" "last" "latch" "later" "laugh"
+    "lawn" "layer" "leap" "learn" "least" "leave" "left" "legal" "lemon"
+    "less" "level" "lever" "lick" "life" "light" "like" "limit" "line" "linen"
+    "list" "live" "liver" "llama" "load" "loan" "lobby" "local" "lodge" "loft"
+    "logic" "long" "look" "loom" "loose" "lost" "love" "lover" "lower" "loyal"
+    "luck" "lump" "lunar" "lunch" "lunge" "lure" "lyric" "magic" "major"
+    "make" "male" "manor" "many" "maple" "march" "mark" "match" "mate" "mayor"
+    "meal" "medal" "media" "melt" "mend" "mercy" "mere" "merge" "merit" "mesh"
+    "metal" "meter" "might" "mile" "mill" "mind" "mine" "minor" "mist" "moan"
+    "model" "money" "month" "mood" "moose" "moral" "more" "most" "mount"
+    "mourn" "mouse" "mouth" "move" "movie" "much" "music" "must" "myth" "nail"
+    "naive" "name" "nasty" "naval" "near" "need" "nerve" "nest" "never" "next"
+    "night" "noble" "noise" "nook" "north" "notch" "note" "novel" "numb"
+    "nurse" "nylon" "occur" "ocean" "offer" "often" "once" "onion" "only"
+    "open" "opera" "orbit" "order" "organ" "outer" "oval" "over" "oxide"
+    "pace" "pact" "page" "pain" "pair" "pale" "palm" "panic" "paper" "part"
+    "party" "pass" "patch" "pause" "pave" "peace" "peach" "pearl" "pedal"
+    "peel" "penny" "phase" "phone" "photo" "piano" "pick" "piece" "pilot"
+    "pinch" "pine" "pipe" "pixel" "pizza" "place" "plain" "plan" "plane"
+    "plank" "plant" "plate" "play" "plaza" "plea" "plead" "pleat" "plod"
+    "plop" "pluck" "plug" "plum" "plumb" "plume" "plump" "poem" "point" "poke"
+    "polar" "pole" "pool" "porch" "pork" "pound" "power" "pray" "press" "prey"
+    "price" "pride" "prime" "print" "prior" "prize" "probe" "prone" "proof"
+    "prop" "proud" "prove" "proxy" "psalm" "pull" "pulse" "punch" "pupil"
+    "pure" "purge" "purse" "quest" "queue" "quick" "quiet" "quiz" "quota"
+    "quote" "race" "radar" "radio" "raft" "rage" "rain" "raise" "rally"
+    "ranch" "range" "rapid" "ratio" "reach" "react" "read" "ready" "realm"
+    "rebel" "reef" "refer" "reign" "relax" "relay" "rely" "repay" "reply"
+    "rest" "rich" "ride" "rider" "ridge" "rifle" "right" "rigid" "ring" "ripe"
+    "risen" "risky" "rival" "river" "road" "roast" "robe" "robot" "rock"
+    "rocky" "roll" "room" "rope" "rose" "rouge" "rough" "round" "route"
+    "rover" "royal" "rugby" "rule" "ruler" "rumor" "rung" "rupee" "rural"
+    "rush" "safe" "sage" "said" "saint" "sake" "salad" "salon" "same" "sand"
+    "sauce" "scale" "scam" "scar" "scare" "scene" "scent" "scope" "score"
+    "scout" "scrap" "seed" "seem" "sense" "sent" "serve" "setup" "seven"
+    "sewer" "shade" "shaft" "shake" "shall" "shame" "shape" "share" "shark"
+    "sharp" "shave" "shed" "shelf" "shell" "shift" "shin" "ship" "shire"
+    "shirt" "shock" "shop" "shore" "short" "shout" "show" "shun" "side"
+    "siege" "sigh" "sight" "sign" "silk" "since" "sixth" "sixty" "skate"
+    "skill" "skim" "skin" "skull" "slab" "slam" "slash" "slate" "slave" "sled"
+    "sleep" "slice" "slide" "slit" "slope" "slug" "small" "smart" "smell"
+    "smile" "smoke" "snag" "snap" "snip" "snug" "soak" "sock" "soft" "soil"
+    "solar" "solve" "some" "song" "soon" "soot" "sore" "sorry" "sort" "soul"
+    "sound" "south" "space" "span" "spare" "spark" "spawn" "speak" "spear"
+    "speed" "spell" "spend" "spice" "spike" "spine" "spoil" "spoke" "spoon"
+    "sport" "spot" "spray" "spur" "squad" "stack" "staff" "stage" "stain"
+    "stair" "stake" "stale" "stalk" "stall" "stamp" "stand" "star" "stark"
+    "start" "stash" "state" "steal" "steam" "steel" "steep" "steer" "stem"
+    "step" "stew" "stick" "stiff" "still" "sting" "stir" "stock" "stomp"
+    "stone" "stood" "stool" "stoop" "stop" "store" "storm" "story" "stout"
+    "stove" "strap" "straw" "stray" "strip" "stuck" "study" "stuff" "stump"
+    "stun" "stung" "stunt" "such" "suds" "sugar" "suit" "super" "sure" "surge"
+    "swam" "swamp" "swarm" "swat" "sway" "swear" "sweat" "sweep" "sweet"
+    "swell" "swept" "swift" "swing" "swirl" "sword" "swore" "sworn" "swung"
+    "syrup" "table" "take" "tale" "talk" "tame" "tang" "tank" "task" "tell"
+    "tent" "test" "than" "that" "theft" "them" "theme" "they" "thick" "thief"
+    "thin" "thing" "think" "third" "this" "thorn" "those" "three" "threw"
+    "throw" "thud" "thumb" "tick" "tier" "tiger" "tight" "tile" "time" "timer"
+    "title" "toast" "token" "tone" "tool" "torch" "toss" "total" "tough"
+    "towel" "tower" "town" "trace" "track" "trade" "trail" "trait" "trash"
+    "tray" "treat" "tree" "trek" "trend" "trial" "tribe" "trick" "tried"
+    "trim" "troop" "truck" "true" "truly" "trunk" "trust" "truth" "tube"
+    "tuft" "tumor" "tuner" "turn" "twig" "twist" "type" "ultra" "uncle"
+    "under" "undue" "union" "unite" "unity" "until" "upper" "upset" "urban"
+    "usher" "usual" "utter" "valid" "valor" "value" "valve" "vault" "veil"
+    "vein" "vent" "venue" "verb" "verse" "very" "vest" "view" "vigor" "vinyl"
+    "viola" "viral" "vivid" "vocal" "vodka" "vogue" "voice" "void" "vote"
+    "voter" "vouch" "waist" "wait" "wall" "want" "warm" "warp" "wasp" "waste"
+    "watch" "water" "wave" "weak" "weary" "weave" "wedge" "weed" "week" "weld"
+    "well" "what" "wheat" "wheel" "when" "where" "whet" "which" "while" "whip"
+    "whisk" "white" "whole" "whose" "wide" "widen" "width" "wild" "will"
+    "wilt" "wind" "wing" "wipe" "wire" "wired" "wisp" "witch" "with" "woman"
+    "wood" "word" "wore" "work" "world" "worm" "worry" "worse" "worst" "worth"
+    "wound" "wrap" "wrath" "wreck" "wren" "wrist" "wrote" "yacht" "yard"
+    "yawn" "year" "yell" "yield" "young" "youth" "zebra"]
+   ;; ~~~ 6-7 letter words (1198 words) ~~~
+   ["abandon" "abolish" "absent" "absorb" "absurd" "accent" "accept" "accord"
+    "accrue" "accuse" "acidic" "across" "acting" "action" "active" "actual"
+    "addict" "adjust" "admire" "advent" "advice" "aerial" "affair" "affirm"
+    "afford" "agenda" "amount" "anchor" "animal" "annual" "answer" "anthem"
+    "apache" "appeal" "appear" "append" "archer" "arctic" "armour" "around"
+    "arrest" "arrive" "artist" "ascend" "aspect" "assert" "assign" "assist"
+    "assume" "asylum" "atomic" "attack" "attend" "averse" "awaken" "ballet"
+    "bamboo" "banana" "banker" "banner" "barber" "barely" "barrel" "basket"
+    "battle" "beacon" "before" "behalf" "behave" "behind" "belong" "benign"
+    "betray" "beyond" "bishop" "bitter" "blazer" "blouse" "bonnet" "border"
+    "borrow" "bottom" "bounce" "branch" "breach" "breath" "breeze" "bridge"
+    "bright" "broken" "broker" "bronze" "bubble" "buckle" "budget" "buffet"
+    "bundle" "burden" "bureau" "burner" "butter" "button" "cabinet" "cactus"
+    "candle" "cannon" "canvas" "canyon" "capable" "captain" "capture" "carbon"
+    "career" "carpet" "carrot" "casino" "castle" "casual" "cattle" "caught"
+    "caution" "census" "center" "central" "century" "cereal" "certain"
+    "chamber" "change" "channel" "chapel" "chapter" "charge" "charity"
+    "cheese" "cherry" "chicken" "choice" "chorus" "chosen" "chrome" "chronic"
+    "cinema" "cipher" "circle" "circus" "citizen" "clause" "client" "climate"
+    "closet" "clumsy" "cluster" "clutch" "coastal" "cobalt" "coffee" "collar"
+    "collect" "colony" "column" "combat" "combine" "comedy" "comfort"
+    "command" "comment" "commit" "common" "company" "compare" "compete"
+    "complex" "comply" "compose" "compost" "concept" "concern" "conduct"
+    "confirm" "connect" "consent" "consist" "consume" "contact" "contain"
+    "content" "contest" "context" "control" "convert" "convey" "cooker"
+    "cookie" "cooking" "copper" "corner" "correct" "cosmic" "cotton" "council"
+    "counter" "country" "county" "courage" "course" "cousin" "cradle" "crafty"
+    "crater" "create" "crisis" "crucial" "cruise" "culture" "cumbia" "current"
+    "curtain" "curtsy" "custom" "dagger" "damage" "dancer" "danger" "deadly"
+    "dealer" "debate" "debris" "decade" "decline" "decree" "defeat" "defect"
+    "defence" "defend" "define" "degree" "delist" "deliver" "demand" "denial"
+    "density" "depend" "deploy" "deposit" "deputy" "derive" "desert" "design"
+    "desire" "detach" "detail" "detect" "device" "devote" "diagram" "dialect"
+    "differ" "digest" "digital" "dilute" "dimmer" "dinner" "direct" "disable"
+    "display" "dispute" "distant" "distort" "disturb" "diverse" "divert"
+    "divide" "divine" "docker" "doctor" "dollar" "dolphin" "domain" "donkey"
+    "dosage" "double" "dragon" "drawer" "driven" "drought" "drying" "duress"
+    "during" "earthy" "eating" "ecology" "economy" "edition" "editor"
+    "educate" "effect" "effort" "either" "elderly" "element" "eleven" "elicit"
+    "emerge" "emotion" "empire" "employ" "enable" "encase" "endure" "energy"
+    "engage" "engine" "enhance" "enlist" "enough" "enrich" "ensign" "ensure"
+    "entail" "entire" "enzyme" "episode" "erosion" "errand" "escape" "essence"
+    "esters" "evident" "evolve" "examine" "exceed" "except" "excise" "excite"
+    "excuse" "exempt" "exhale" "exhibit" "exotic" "expand" "expect" "expend"
+    "exploit" "explore" "export" "expose" "express" "extend" "extent"
+    "extract" "extreme" "fabric" "factor" "faculty" "famine" "famous" "fanout"
+    "farmer" "fashion" "father" "fatigue" "feature" "fellow" "ferret"
+    "fiction" "fiddle" "fierce" "figure" "filter" "finance" "finger" "fiscal"
+    "fitter" "flawed" "flight" "flinch" "floppy" "flower" "fluffy" "flying"
+    "folder" "follow" "foreign" "forest" "formal" "format" "formula" "fortune"
+    "forward" "fossil" "foster" "founder" "freedom" "freight" "frenzy"
+    "friend" "fringe" "frisky" "frosty" "frozen" "frugal" "fulfill" "fumble"
+    "funeral" "furnace" "further" "future" "gadget" "gained" "galaxy" "gallon"
+    "gamble" "garage" "garden" "garlic" "gateway" "gather" "gazebo" "general"
+    "gentle" "gently" "genuine" "gesture" "gifted" "ginger" "glider" "glimpse"
+    "global" "glossy" "gluten" "goblet" "godson" "golden" "gospel" "gossip"
+    "govern" "gradual" "grammar" "granite" "gravel" "gravity" "grocery"
+    "groove" "ground" "growth" "grumpy" "guilty" "guitar" "gutter" "gypsum"
+    "halfway" "halves" "hamlet" "hammer" "handle" "hangar" "happen" "harass"
+    "harbor" "harden" "hardly" "harmony" "harvest" "hazard" "header" "health"
+    "healthy" "heater" "heating" "heaven" "height" "helmet" "helpful" "herbal"
+    "hidden" "highway" "hiking" "hinder" "history" "holder" "holiday" "hollow"
+    "honest" "horizon" "hornet" "horror" "hosted" "hourly" "housing" "huddle"
+    "humble" "hunger" "hunter" "hybrid" "iceberg" "ignite" "illegal" "imagine"
+    "immense" "immune" "impact" "import" "impose" "impure" "indent" "indoor"
+    "infant" "influx" "inform" "initial" "injure" "inmate" "innate" "inquiry"
+    "insane" "insect" "insert" "inside" "insist" "inspect" "install" "instant"
+    "intact" "intake" "intend" "intent" "interim" "intern" "invade" "invent"
+    "invest" "invoke" "inward" "island" "jackal" "jacket" "jargon" "jersey"
+    "jockey" "jostle" "journey" "jumble" "jungle" "junior" "justice" "justify"
+    "kennel" "kernel" "kettle" "kidney" "killer" "kitten" "knight" "ladder"
+    "lagoon" "lament" "lander" "lastly" "lately" "latent" "latest" "latter"
+    "launch" "lavish" "lawyer" "layout" "leader" "league" "leather" "legacy"
+    "legend" "lender" "length" "lesion" "lesson" "lethal" "letter" "liable"
+    "liberty" "license" "likely" "liquid" "listen" "lively" "living" "lizard"
+    "locate" "locker" "logical" "lonely" "loosen" "lounge" "loyalty" "luggage"
+    "lumber" "maiden" "malice" "mallet" "mammal" "manage" "mangle" "manner"
+    "mantle" "marble" "margin" "marker" "market" "marvel" "massive" "master"
+    "matter" "mature" "meadow" "measure" "mellow" "memoir" "memory" "mender"
+    "mental" "mention" "mentor" "merger" "method" "mineral" "mingle" "minute"
+    "mirror" "misery" "missile" "mission" "mister" "mitten" "mixture" "mobile"
+    "modern" "modest" "molten" "moment" "monitor" "monkey" "monster" "morals"
+    "morning" "mortar" "mosaic" "mostly" "mother" "motion" "muddle" "muffle"
+    "murder" "museum" "muster" "mutual" "muzzle" "mystery" "napkin" "narrow"
+    "nation" "nature" "nectar" "negate" "nephew" "nettle" "neural" "neutral"
+    "nibble" "nickel" "nimble" "nitric" "noodle" "normal" "notable" "notary"
+    "nothing" "notice" "nozzle" "nuclear" "nuclei" "nugget" "number" "nursing"
+    "nutmeg" "obesity" "object" "observe" "obtain" "obvious" "offend"
+    "offense" "office" "oldest" "ongoing" "opaque" "operate" "oppose" "oracle"
+    "orange" "orchid" "organic" "orient" "origin" "outage" "outbid" "outcry"
+    "outdoor" "outfit" "outlaw" "outlet" "outline" "outlook" "output" "outrun"
+    "overlap" "oversee" "oxygen" "oyster" "paddle" "palace" "pander" "parade"
+    "parcel" "pardon" "parent" "partly" "patent" "pebble" "pencil" "people"
+    "pepper" "period" "permit" "persist" "person" "pickle" "pigeon" "pillar"
+    "pillow" "pirate" "pistol" "plague" "planet" "plaque" "plasma" "player"
+    "please" "pledge" "plenty" "plough" "plunge" "plural" "pocket" "poison"
+    "policy" "polish" "polite" "ponder" "portal" "portion" "poster" "potato"
+    "potion" "potter" "poverty" "praise" "prayer" "preach" "predict" "prefer"
+    "premium" "prepare" "present" "pretty" "prevent" "primary" "prince"
+    "printer" "prison" "privacy" "problem" "proceed" "process" "produce"
+    "product" "profile" "profit" "program" "project" "prolong" "promise"
+    "promote" "prompt" "propel" "proper" "protect" "protest" "proven"
+    "provide" "public" "publish" "puddle" "puppet" "pursue" "puzzle" "quarry"
+    "quarter" "quartz" "rabbit" "racket" "radical" "radish" "rafter" "raised"
+    "raisin" "random" "ranger" "ransom" "rapids" "rarely" "rattle" "ravine"
+    "reacts" "reader" "reading" "reality" "really" "reason" "rebuild" "recall"
+    "receipt" "recent" "recess" "reckon" "record" "recover" "redeem" "reduce"
+    "refine" "reflect" "reform" "refuge" "refund" "refuse" "regain" "regard"
+    "regime" "region" "regret" "reject" "relate" "related" "release" "relief"
+    "relish" "reload" "remain" "remedy" "remind" "remote" "removal" "remove"
+    "render" "renewal" "rental" "repeal" "repeat" "replace" "report" "request"
+    "require" "rescue" "resent" "reside" "resign" "resist" "resolve" "resort"
+    "respect" "respond" "restore" "result" "resume" "retail" "retain" "retire"
+    "retort" "retreat" "return" "reveal" "revenge" "reverse" "review" "revolt"
+    "reward" "ribbon" "riddle" "riffle" "ripple" "ritual" "robust" "rocket"
+    "rotate" "rotten" "routine" "rubber" "rubble" "ruffle" "rumble" "runner"
+    "rustic" "sacred" "saddle" "safari" "salmon" "sample" "sandal" "satisfy"
+    "scenic" "scholar" "school" "scorch" "scratch" "screen" "scroll" "search"
+    "season" "second" "secret" "sector" "secure" "segment" "seldom" "select"
+    "senior" "sequel" "sermon" "settle" "shadow" "shelter" "shield" "should"
+    "shower" "shrewd" "shrink" "shroud" "shrunk" "shudder" "signal" "silence"
+    "silent" "silver" "similar" "simmer" "simple" "singer" "single" "sister"
+    "sketch" "skilled" "sleeve" "slipper" "slogan" "smaller" "smooth" "smudge"
+    "snatch" "social" "society" "socket" "soften" "soldier" "solely" "solemn"
+    "somehow" "soothe" "sorbet" "sorrow" "source" "speaker" "speech" "spider"
+    "spiral" "spirit" "splash" "splice" "sponge" "spouse" "sprawl" "spread"
+    "spring" "sprint" "square" "squash" "squeak" "squeal" "squint" "squire"
+    "stable" "staple" "statue" "status" "steady" "stolen" "storage" "storey"
+    "strain" "strand" "stream" "street" "strewn" "stride" "strike" "string"
+    "stripe" "strive" "stroke" "strong" "struck" "student" "subject" "submit"
+    "subtle" "succeed" "sucker" "sudden" "suffix" "suicide" "summer" "summit"
+    "sunken" "superb" "supply" "support" "surely" "surplus" "survey" "survive"
+    "suspect" "sustain" "switch" "symbol" "system" "tackle" "tactic" "tailor"
+    "talent" "tamper" "tangle" "tariff" "teapot" "temper" "temple" "tenant"
+    "tender" "terror" "tether" "therapy" "thirst" "thirty" "thorny" "though"
+    "thought" "thread" "threat" "thrive" "throne" "throng" "thrust" "ticket"
+    "tickle" "tiddly" "timber" "tinder" "tissue" "tobacco" "toddle" "tomato"
+    "tongue" "tonight" "torque" "tourism" "toward" "traffic" "tragedy"
+    "trance" "trauma" "travel" "treaty" "trench" "tribal" "trigger" "triple"
+    "trophy" "trouble" "trudge" "tumble" "tundra" "tunnel" "turban" "turning"
+    "turtle" "tussle" "twelve" "tycoon" "typical" "umpire" "unable" "unfair"
+    "unfold" "unfurl" "unhook" "unique" "unison" "unjust" "unless" "unload"
+    "unlock" "unpack" "unrest" "unruly" "unseen" "untidy" "unveil" "upbeat"
+    "update" "uphold" "uproar" "uptake" "upward" "usable" "useful" "utmost"
+    "vacant" "vacuum" "vainly" "valley" "vanish" "vanity" "variety" "vehicle"
+    "velvet" "vendor" "venture" "verbal" "vermin" "version" "versus" "vessel"
+    "veteran" "viable" "victim" "village" "violent" "violin" "virtue"
+    "visible" "vision" "volume" "voyage" "waffle" "walnut" "walrus" "wander"
+    "warden" "warfare" "warmly" "warmth" "warning" "wealth" "weapon" "wedding"
+    "weekly" "weight" "welcome" "welder" "welfare" "western" "whisper"
+    "wholly" "wicked" "window" "winery" "winning" "winter" "wisdom" "within"
+    "wizard" "wonder" "worker" "workout" "worthy" "wreath" "writing" "yellow"
+    "zenith" "zigzag" "zodiac"]
+   ;; ~~~ 8-9 letter words (880 words) ~~~
+   ["aberrant" "abnormal" "abortion" "abrasion" "abruptly" "absolute"
+    "absorber" "abstract" "abundant" "academic" "accident" "accurate"
+    "achieved" "acoustic" "acquired" "activate" "actively" "adapting"
+    "addicted" "addition" "adequate" "adhesive" "adjacent" "adjusted"
+    "admiring" "admitted" "adopting" "adoption" "adorable" "advanced"
+    "advisory" "advocate" "affected" "agreeing" "aircraft" "alarming"
+    "allergic" "alliance" "allocate" "allowing" "alphabet" "although"
+    "ambiance" "ambition" "ambulant" "amending" "amusable" "analysis"
+    "ancestor" "animated" "annotate" "announce" "annoying" "anterior"
+    "antimony" "anything" "anywhere" "apologue" "apparent" "appendix"
+    "appetite" "appraise" "approach" "approval" "argument" "arterial"
+    "artifact" "aspiring" "assembly" "assuming" "asteroid" "athletic"
+    "attorney" "audience" "autonomy" "aviation" "bachelor" "backbone"
+    "backdrop" "backfire" "backhand" "backlash" "backward" "bacteria"
+    "balanced" "bankrupt" "baritone" "barnacle" "barnyard" "baseball"
+    "basement" "bathroom" "becoming" "befriend" "beginner" "behavior"
+    "bellowed" "betrayal" "beverage" "billiard" "birthday" "biweekly"
+    "blackout" "blankets" "bleeding" "blending" "blessing" "blizzard"
+    "blogging" "blossoms" "borrowed" "botanist" "boundary" "bracelet"
+    "breeding" "brighten" "brightly" "broiling" "brothers" "browsing"
+    "brunette" "brushing" "building" "bulletin" "bursting" "bushfire"
+    "bustling" "calendar" "callback" "campaign" "canister" "capacity"
+    "cardinal" "carefree" "carnival" "cassette" "casualty" "catalyst"
+    "catching" "category" "catering" "cautious" "cellular" "centered"
+    "ceremony" "chairman" "champion" "charcoal" "checkbox" "checkout"
+    "checksum" "cheerful" "chemical" "children" "chrysler" "circular"
+    "citation" "civilian" "cladding" "claiming" "clanking" "clapping"
+    "clasping" "classify" "cleaning" "clearing" "climbing" "clinical"
+    "clipping" "clockwork" "clothing" "coaching" "coalesce" "coherent"
+    "collapse" "colonial" "colorful" "combated" "combined" "comeback"
+    "commerce" "commonly" "communal" "commuter" "compiled" "compiler"
+    "complain" "complete" "composed" "compound" "compress" "comprise"
+    "computed" "computer" "conceive" "conclude" "concrete" "confetti"
+    "confined" "conflict" "confront" "confused" "congress" "conjunct"
+    "connects" "conquers" "conquest" "conserve" "consider" "conspire"
+    "constant" "consular" "consumer" "contempt" "continue" "contract"
+    "contrast" "converge" "convince" "cookbook" "coronary" "corridor"
+    "corrosion" "cosmetic" "coupling" "coverage" "cracking" "crafting"
+    "cramming" "crashing" "crawling" "creating" "creation" "creature"
+    "credited" "criminal" "critical" "critique" "crooning" "crossing"
+    "crunched" "cucumber" "cultural" "cupboard" "currency" "customer"
+    "cylinder" "database" "daybreak" "deadline" "debating" "deceiver"
+    "decisive" "declared" "declined" "decoding" "decorate" "decrease"
+    "deducted" "deepened" "defender" "deferral" "defiance" "definite"
+    "delicate" "delivers" "delivery" "democrat" "demolish" "departed"
+    "depicted" "deployed" "deposing" "describe" "designed" "designer"
+    "despatch" "destruct" "detailed" "detected" "detector" "devotion"
+    "diabetes" "diagonal" "dialogue" "dinosaur" "diplomat" "directed"
+    "directly" "disabled" "disagree" "disaster" "disclose" "discount"
+    "discover" "discreet" "dispatch" "disperse" "displace" "disposal"
+    "dissolve" "distance" "distinct" "distract" "district" "dividend"
+    "dizzying" "doctrine" "document" "doldrums" "domestic" "dominant"
+    "donation" "doorbell" "doorstep" "doubtful" "downhill" "download"
+    "downtown" "drafting" "drainage" "dramatic" "dreaming" "dressing"
+    "drifting" "drilling" "drinking" "droplets" "dropping" "drowning"
+    "drumming" "duckweed" "dumbbell" "dumpling" "dumpster" "duration"
+    "dutchman" "dwelling" "dynamics" "earnings" "eclectic" "economic"
+    "educated" "educator" "effected" "eighteen" "election" "elegance"
+    "elephant" "elevated" "elevator" "eligible" "eloquent" "embedded"
+    "embezzle" "emerging" "emission" "emoticon" "emphasis" "employed"
+    "emporium" "empowered" "enclosed" "encoding" "endorsed" "engaging"
+    "engineer" "enormous" "enriched" "enrolled" "ensemble" "entering"
+    "entirely" "entitled" "entrance" "envelope" "envision" "epidemic"
+    "equality" "equation" "equipped" "erecting" "escalate" "escaping"
+    "espresso" "estimate" "eternity" "evaluate" "eventual" "everyday"
+    "everyone" "evidence" "evolving" "examined" "examples" "exchange"
+    "exciting" "excluded" "exercise" "exertion" "existing" "expanded"
+    "expected" "expedite" "expelled" "explicit" "explored" "exponent"
+    "exported" "exposure" "extended" "exterior" "external" "extracts"
+    "eyesight" "fabulous" "facebook" "facility" "failover" "faithful"
+    "fallback" "familiar" "farmland" "farthest" "fastened" "favorite"
+    "fearless" "feasible" "featured" "feedback" "feminine" "festival"
+    "fiercely" "fighting" "figuring" "filament" "filename" "filmmaker"
+    "filtered" "finalist" "finalize" "findings" "finished" "firewall"
+    "flagship" "flattery" "flexible" "floating" "flooding" "flourish"
+    "folklore" "followed" "follower" "football" "foothold" "footprint"
+    "footwear" "forecast" "foremost" "forensic" "formerly" "formwork"
+    "fortress" "founding" "fourteen" "fraction" "fragment" "freckled"
+    "freeload" "frequent" "friendly" "frontier" "fruitful" "fruition"
+    "fullback" "fulltime" "function" "gambling" "gardener" "gasoline"
+    "gathered" "generate" "generous" "genetics" "genocide" "geometry"
+    "gigantic" "glancing" "glitters" "globally" "glorious" "goodness"
+    "goodwill" "gorgeous" "governed" "governor" "graceful" "gracious"
+    "graduate" "graphics" "grasping" "grateful" "greeting" "grinding"
+    "gripping" "grounded" "growling" "grudging" "guardian" "guidance"
+    "gunpoint" "gymnasium" "habitual" "handbook" "handling" "handsome"
+    "happened" "hardball" "hardcore" "hardened" "hardship" "hardware"
+    "harmless" "harmonic" "harshest" "headband" "headline" "headlong"
+    "headroom" "helpless" "heritage" "hermetic" "highland" "hilarity"
+    "historic" "holdback" "homeless" "homework" "honestly" "hopeless"
+    "horrible" "horrific" "hospital" "hostages" "hotelier" "humanity"
+    "humility" "humorous" "hydrogen" "hygienic" "icecream" "idealist"
+    "identify" "ideology" "ignorant" "illusion" "imperial" "incident"
+    "increase" "indicate" "indirect" "industry" "inferior" "infinite"
+    "informed" "inherent" "innocent" "insecure" "interact" "interest"
+    "internal" "interval" "intimate" "invasion" "investor" "isolated"
+    "judgment" "keyboard" "kindness" "knitting" "landlord" "language"
+    "laughter" "lavender" "lawmaker" "learning" "lifetime" "likewise"
+    "limiting" "listener" "literacy" "literary" "location" "lonesome"
+    "longtime" "magnetic" "maintain" "majority" "makeover" "managing"
+    "manifest" "marathon" "marginal" "marriage" "massacre" "material"
+    "maturity" "maximize" "measured" "mechanic" "medicine" "medieval"
+    "membrane" "merchant" "metaphor" "midnight" "military" "minister"
+    "minority" "mischief" "moderate" "molecule" "momentum" "monopoly"
+    "mortgage" "mounting" "movement" "multiple" "mumbling" "muscular"
+    "mutation" "national" "negative" "neighbor" "networks" "nineteen"
+    "nominate" "nonsense" "notebook" "numerous" "obstacle" "occasion"
+    "occupied" "offering" "official" "offshore" "opponent" "opposite"
+    "optimism" "ordinary" "organism" "organize" "oriented" "original"
+    "outbreak" "overcome" "overlook" "overture" "painting" "parallel"
+    "parental" "passport" "patience" "peaceful" "peculiar" "pedagogy"
+    "pedaling" "pendulum" "perceive" "personal" "persuade" "petition"
+    "platform" "pleasant" "pleasure" "plunging" "pointing" "policing"
+    "populace" "populate" "portrait" "position" "positive" "possible"
+    "powerful" "practice" "precious" "prepared" "presence" "preserve"
+    "pressing" "previous" "printing" "priority" "prisoner" "probable"
+    "producer" "profound" "progress" "prohibit" "promptly" "properly"
+    "property" "proposal" "prospect" "provider" "province" "publicly"
+    "purchase" "pursuing" "puzzling" "quantity" "quarters" "question"
+    "quotient" "railroad" "rational" "reaching" "reaction" "readable"
+    "reasoned" "received" "recorder" "recovery" "referral" "register"
+    "regulate" "relevant" "religion" "remember" "renowned" "repeated"
+    "reporter" "republic" "research" "resident" "resigned" "resource"
+    "response" "restless" "restrain" "restrict" "retailer" "retiring"
+    "reversal" "revision" "rhetoric" "rigorous" "romantic" "salesman"
+    "sanction" "sandwich" "scenario" "schedule" "scrutiny" "seasonal"
+    "security" "sensible" "sentence" "separate" "sequence" "sergeant"
+    "settling" "severely" "shipping" "shocking" "shooting" "shortage"
+    "shoulder" "sidewalk" "simplify" "simulate" "singular" "skeleton"
+    "slightly" "slippery" "smallest" "snapshot" "software" "solution"
+    "somebody" "somewhat" "southern" "speaking" "specific" "spectrum"
+    "spelling" "spending" "spinning" "splendid" "sporting" "spotless"
+    "sprinkle" "squander" "staffing" "standard" "standing" "startled"
+    "steadily" "stimulus" "stocking" "stopping" "straight" "stranger"
+    "strategy" "strength" "striking" "strongly" "struggle" "stumbled"
+    "stunning" "suburban" "suddenly" "suitable" "superman" "supplier"
+    "suppress" "surgical" "surprise" "survival" "swimming" "symbolic"
+    "sympathy" "tangible" "teaching" "teammate" "terminal" "terrific"
+    "thinking" "thirteen" "thorough" "thousand" "thriller" "together"
+    "tolerant" "tomorrow" "tracking" "training" "transfer" "treasure"
+    "treating" "trillion" "tropical" "troubled" "turnover" "ultimate"
+    "uncommon" "underway" "universe" "unlawful" "unlikely" "updating"
+    "uprising" "utilized" "vacation" "validity" "valorous" "valuable"
+    "variable" "velocity" "vendetta" "ventures" "vertical" "vigorous"
+    "violated" "visiting" "vitamins" "volatile" "volcanic" "watching"
+    "weakness" "weighing" "wherever" "wildlife" "wireless" "withdraw"
+    "woodland" "workshop" "worrying" "yielding"]
+   ;; ~~~ 10-11 letter words (457 words) ~~~
+   ["abandonment" "abbreviated" "absolutely" "accelerated" "accompanied"
+    "accomplish" "accordingly" "accountant" "accumulated" "accurately"
+    "accusation" "acknowledge" "acquisition" "adaptation" "additional"
+    "adjustment" "admiration" "adolescent" "adventurous" "advertising"
+    "affirmative" "affordable" "aggravating" "aggressive" "allegations"
+    "alternating" "altogether" "ambassador" "ammunition" "anniversary"
+    "anticipated" "apparently" "appearance" "appearances" "application"
+    "appointment" "approaching" "appropriate" "approximate" "arrangement"
+    "association" "assumption" "atmosphere" "atmospheric" "attachment"
+    "attendance" "attraction" "authorities" "automobile" "awkwardness"
+    "background" "backlashing" "backpacking" "bankruptcy" "basketball"
+    "battlefield" "beforehand" "beneficial" "beneficiary" "birthplace"
+    "blacksmith" "blossoming" "bombardment" "bookkeeping" "bottlenecks"
+    "boundaries" "brilliance" "broadcaster" "brotherhood" "bureaucracy"
+    "butterflies" "calculating" "calibrating" "capitalism" "captivating"
+    "celebrated" "centralized" "certificate" "chairperson" "challenging"
+    "championing" "chancellor" "chandeliers" "cheerfully" "chromosome"
+    "comfortable" "commanding" "commandment" "commentary" "commitment"
+    "commonplace" "communicate" "communists" "comparable" "comparisons"
+    "compelling" "competence" "competition" "completely" "complexity"
+    "compliance" "complicated" "composition" "compromise" "concentrate"
+    "conception" "conclusion" "conditional" "confession" "confidence"
+    "confidently" "conflicting" "confronted" "conjunction" "connecting"
+    "conscience" "consecutive" "consequence" "consequent" "considering"
+    "consistency" "conspicuous" "conspiracy" "constituent" "constraint"
+    "constraints" "consulting" "contestant" "continental" "contribute"
+    "contributor" "controller" "controversy" "convenience" "convention"
+    "conventions" "convertible" "conviction" "cooperation" "coordinate"
+    "coordinator" "cornerstone" "corporation" "corruption" "counseling"
+    "counterfeit" "countryside" "courthouse" "creativity" "credentials"
+    "culmination" "curriculum" "customarily" "dangerously" "deceptively"
+    "declaration" "decorating" "dedication" "deficiency" "definitely"
+    "delegation" "deliberate" "democratic" "demonstrate" "denominator"
+    "department" "dependency" "deployment" "depression" "descendant"
+    "description" "designated" "designation" "destruction" "detachment"
+    "determined" "development" "dictionary" "differently" "dimensional"
+    "dimensions" "diplomatist" "directions" "disappeared" "disclaimer"
+    "discontinue" "discovering" "discretion" "discussing" "discussions"
+    "dismissing" "disruption" "dissolution" "distinctive" "distinguish"
+    "distribute" "distributed" "disturbance" "documentary" "domesticate"
+    "dominating" "earthquake" "educational" "effectively" "efficiency"
+    "elaboration" "elementary" "eliminated" "elimination" "embarrassed"
+    "emigration" "emotionally" "employment" "encountered" "encounters"
+    "encouraging" "enforcement" "engagement" "engineering" "enlightened"
+    "enterprise" "enthusiasm" "environment" "equivalent" "especially"
+    "essentially" "established" "evaluation" "everything" "examination"
+    "excitement" "exclamation" "exclusively" "exhibition" "expectation"
+    "expedition" "expenditure" "experienced" "experiment" "explaining"
+    "explanation" "exploration" "expression" "extensively" "extinction"
+    "extravagant" "facilitate" "fascinated" "fingertips" "flashlight"
+    "fluctuating" "forefathers" "foundation" "fractional" "fragmented"
+    "friendship" "frustrated" "fulfilling" "furthermore" "generation"
+    "geographic" "government" "graduation" "grasshopper" "gratifying"
+    "guaranteed" "guidelines" "handwriting" "harassment" "hereditary"
+    "hesitation" "highlighted" "highlights" "homesteader" "horizontal"
+    "hospitality" "hypothesis" "illuminate" "illustrate" "imagination"
+    "immediately" "immigration" "immobilize" "implication" "importantly"
+    "impression" "incomplete" "indication" "industrial" "inequality"
+    "inevitable" "infectious" "injunction" "innovation" "inspection"
+    "instrument" "integrated" "interested" "introduced" "investment"
+    "invitation" "journalism" "justifying" "laboratory" "leadership"
+    "legitimate" "likelihood" "limitation" "linguistic" "litigation"
+    "locomotive" "mainstream" "management" "manipulate" "manuscript"
+    "meaningful" "mechanical" "membership" "metabolism" "microscope"
+    "missionary" "motivation" "motorcycle" "mysterious" "nationwide"
+    "newsletter" "nomination" "obligation" "occupation" "occurrence"
+    "opposition" "outlandish" "outperform" "overcoming" "overlooking"
+    "parliament" "passionate" "percentage" "permission" "permitting"
+    "persistent" "philosopher" "plantation" "politicking" "popularity"
+    "possession" "potentially" "powerfully" "practicable" "predecessor"
+    "prediction" "preliminary" "preparation" "presidency" "prestigious"
+    "presumably" "prevention" "proceeding" "proceedings" "production"
+    "profession" "profitable" "projection" "promotional" "proportion"
+    "proposition" "prosperity" "protective" "provisional" "provisions"
+    "publication" "punishment" "quarantine" "quarterback" "rebuilding"
+    "recognized" "reconstruct" "recreation" "referendum" "reflecting"
+    "regulation" "regulations" "relaxation" "remarkable" "remembering"
+    "reminiscent" "replacement" "represented" "reputation" "requirement"
+    "residential" "resignation" "resistance" "resolution" "responsible"
+    "retirement" "retribution" "revelation" "revolution" "ridiculous"
+    "scholarship" "settlement" "shareholder" "sharpening" "significant"
+    "similarity" "simplicity" "simulation" "sovereignty" "spectacular"
+    "stereotype" "stockholder" "strengthen" "structural" "subsequent"
+    "substantial" "sufficient" "suggestion" "supplement" "suspension"
+    "tablespoon" "technology" "television" "temperature" "themselves"
+    "therapeutic" "thoughtful" "threatened" "threatening" "touchstone"
+    "tournament" "transition" "transmitted" "transparent" "tremendous"
+    "uncertainty" "underground" "underlying" "understand" "undertaking"
+    "unemployed" "unfamiliar" "unfortunate" "uniformity" "university"
+    "unnecessary" "unofficial" "utilitarian" "validation" "vegetation"
+    "volleyball" "voluntarily" "vulnerable" "waterfront" "widespread"
+    "withdrawal" "yourselves"]
+   ;; ~~~ 12+ letter words (154 words) ~~~
+   ["abbreviation" "accidentally" "accomplished" "accomplishing"
+    "accountability" "accumulation" "acknowledged" "acknowledgment"
+    "administration" "advertisement" "announcement" "appreciation"
+    "appropriated" "approximately" "archaeological" "architectural"
+    "argumentative" "authenticity" "automatically" "biodiversity"
+    "breakthrough" "broadcasting" "characteristic" "chronological"
+    "circumstance" "collaboration" "commemorating" "commercialize"
+    "communication" "compassionate" "comprehensive" "concentration"
+    "confederation" "congregation" "congressional" "conscientious"
+    "consciousness" "consequential" "consideration" "consolidated"
+    "consolidation" "constellation" "constitutional" "construction"
+    "contamination" "contributions" "controversial" "correspondent"
+    "corresponding" "counterattack" "deliberately" "demonstration"
+    "deterioration" "determination" "developmental" "disadvantaged"
+    "disappointed" "disappointment" "discrimination" "disqualified"
+    "distinguished" "distribution" "documentation" "dramatically"
+    "effectiveness" "entertainment" "entrepreneur" "environmental"
+    "establishment" "exaggeration" "experiential" "experimentation"
+    "extraordinary" "fortification" "fundamentally" "globalization"
+    "grandchildren" "gravitational" "hallucination" "headquarters"
+    "heterogeneous" "humanitarian" "identification" "illustrations"
+    "implementation" "improvisation" "incorporating" "independently"
+    "indispensable" "individualism" "industrialize" "infrastructure"
+    "insignificant" "institutional" "instrumentation" "international" "irresponsibly"
+    "interpretation" "investigation" "justification" "knowledgeable"
+    "manufacturing" "mathematician" "mediterranean" "misconception"
+    "misunderstand" "modernization" "multinational" "neighborhood"
+    "neighbourhood" "opportunities" "organizational" "organizations"
+    "outstandingly" "overwhelming" "overwhelmingly" "parliamentary"
+    "participation" "pharmaceutical" "philosophical" "precipitation"
+    "predetermined" "predominantly" "privatization" "professionalism"
+    "professionals" "pronunciation" "psychological" "qualification"
+    "questionnaire" "recommendation" "refrigeration" "refrigerator"
+    "relationships" "representative" "restructuring" "revolutionary"
+    "semiconductor" "significantly" "simultaneously" "sophisticated"
+    "specialization" "specification" "specifications" "strengthening"
+    "superintendent" "technological" "traditionally" "transformation"
+    "uncomfortable" "understanding" "unfortunately" "unprecedented"
+    "vulnerability" "wholehearted"])
+  "Vector of ~4258 common English words for `full-words' mode.
+Words are selected for variety of letter patterns and length
+distribution, and are suitable for typing practice.")
 
 ;;;; Buffer-local state variables
 ;; These are set buffer-local in the *touchtype* buffer.
@@ -367,6 +1018,49 @@ suitable for typing practice.")
 
 (defvar touchtype--char-overlays nil
   "Vector of per-character overlays in the typed feedback region.")
+
+(defvar touchtype--session-corrections 0
+  "Total backspace/word-backspace presses in the current session.")
+
+(defvar touchtype--session-start-time nil
+  "Float-time timestamp when the current session started.")
+
+(defvar touchtype--session-line-wpms nil
+  "List of per-line WPM values for consistency calculation.")
+
+(defvar touchtype--narrative-passage nil
+  "The current narrative passage text being typed.")
+
+(defvar touchtype--narrative-offset 0
+  "Current read offset into `touchtype--narrative-passage'.")
+
+(defvar touchtype--custom-passage nil
+  "The current custom passage text being typed.")
+
+(defvar touchtype--custom-offset 0
+  "Current read offset into `touchtype--custom-passage'.")
+
+(defvar touchtype--session-timer nil
+  "Timer object for timed sessions.")
+
+(defvar touchtype--session-idle-time 0.0
+  "Accumulated idle time in seconds excluded from WPM calculations.")
+
+(defvar touchtype--preview-texts nil
+  "List of upcoming line strings for multi-line preview.")
+
+(defvar touchtype--pace-timer nil
+  "Timer for the pace caret.")
+
+(defvar touchtype--pace-pos 0
+  "Current position of the pace caret.")
+
+(defvar touchtype--pace-overlay nil
+  "Overlay for the pace caret.")
+
+(defvar touchtype--completed-lines nil
+  "List of propertized strings for previously completed lines.
+Displayed above the active typing line, most recent first.")
 
 (provide 'touchtype-var)
 

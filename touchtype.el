@@ -70,6 +70,7 @@
 (require 'touchtype-stats)
 (require 'touchtype-algo)
 (require 'touchtype-ui)
+(require 'touchtype-narrative)
 
 (declare-function touchtype-ui-setup-buffer  "touchtype-ui")
 (declare-function touchtype-ui-show-stats    "touchtype-ui")
@@ -93,54 +94,207 @@ Do not enable this mode manually; use `touchtype' or one of the
     (kill-local-variable 'truncate-lines)
     (kill-local-variable 'line-spacing)))
 
+;;;; Session length
+
+;;;###autoload
+(defun touchtype-set-session-length ()
+  "Set `touchtype-session-length' from `touchtype-session-length-presets'."
+  (interactive)
+  (let* ((names (mapcar (lambda (p)
+                          (format "%s (%d words)" (car p) (cdr p)))
+                        touchtype-session-length-presets))
+         (choice (completing-read "Session length: " names nil t))
+         (sym (intern (car (split-string choice " ")))))
+    (let ((pair (assq sym touchtype-session-length-presets)))
+      (when pair
+        (setq touchtype-session-length (cdr pair))
+        (message "Session length set to %d words (%s)"
+                 (cdr pair) (car pair))))))
+
+(defun touchtype--apply-prefix-arg (arg)
+  "When prefix ARG is non-nil, set `touchtype-session-length' to its value."
+  (when arg
+    (setq touchtype-session-length (prefix-numeric-value arg))))
+
 ;;;; Entry point commands
 
 ;;;###autoload
-(defun touchtype ()
-  "Start a touchtype session in the mode set by `touchtype-mode-selection'."
-  (interactive)
+(defun touchtype (&optional arg)
+  "Start a touchtype session in the mode set by `touchtype-mode-selection'.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
-(defun touchtype-progressive ()
-  "Start a touchtype session in progressive key-unlock mode."
-  (interactive)
+(defun touchtype-progressive (&optional arg)
+  "Start a touchtype session in progressive key-unlock mode.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
   (setq touchtype-mode-selection 'progressive)
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
-(defun touchtype-full-words ()
-  "Start a touchtype session using real English words."
-  (interactive)
+(defun touchtype-full-words (&optional arg)
+  "Start a touchtype session using real English words.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
   (setq touchtype-mode-selection 'full-words)
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
-(defun touchtype-bigram-drill ()
-  "Start a touchtype session drilling common English bigrams."
-  (interactive)
+(defun touchtype-bigram-drill (&optional arg)
+  "Start a touchtype session drilling common English bigrams.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
   (setq touchtype-mode-selection 'bigram-drill)
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
-(defun touchtype-letters ()
-  "Start a touchtype session using all 26 letters."
-  (interactive)
+(defun touchtype-trigram-drill (&optional arg)
+  "Start a touchtype session drilling common English trigrams.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'trigram-drill)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-tetragram-drill (&optional arg)
+  "Start a touchtype session drilling common English tetragrams.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'tetragram-drill)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-ngram-drill (&optional arg)
+  "Start a touchtype session drilling mixed bigrams, trigrams, and tetragrams.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'ngram-drill)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-letters (&optional arg)
+  "Start a touchtype session using all 26 letters.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
   (setq touchtype-mode-selection 'letters)
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
-(defun touchtype-letters+numbers ()
-  "Start a touchtype session using letters and digits 0–9."
-  (interactive)
+(defun touchtype-letters+numbers (&optional arg)
+  "Start a touchtype session using letters and digits 0–9.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
   (setq touchtype-mode-selection 'letters+numbers)
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
-(defun touchtype-letters+numbers+symbols ()
-  "Start a touchtype session using letters, digits, and common punctuation."
-  (interactive)
+(defun touchtype-letters+numbers+symbols (&optional arg)
+  "Start a touchtype session using letters, digits, and common punctuation.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
   (setq touchtype-mode-selection 'letters+numbers+symbols)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-narrative (&optional arg)
+  "Start a touchtype session using narrative text from Project Gutenberg.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'narrative)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-common-words (&optional arg)
+  "Start a touchtype session using the top N common words.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'common-words)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-custom (&optional text)
+  "Start a touchtype session with custom TEXT.
+If region is active, use region text.  Otherwise prompt for TEXT.
+Normalizes whitespace (newlines/tabs to spaces, collapses multiples)."
+  (interactive
+   (list (if (use-region-p)
+             (buffer-substring-no-properties (region-beginning) (region-end))
+           (read-string "Custom text: "))))
+  (when (or (null text) (string-empty-p (string-trim text)))
+    (user-error "No text provided"))
+  (let ((normalized (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim text))))
+    (setq touchtype-session-type 'words)
+    (setq touchtype-mode-selection 'custom)
+    ;; Set passage vars before setup-buffer which makes them buffer-local
+    (let ((buf (get-buffer-create "*touchtype*")))
+      (with-current-buffer buf
+        (make-local-variable 'touchtype--custom-passage)
+        (make-local-variable 'touchtype--custom-offset)
+        (setq touchtype--custom-passage normalized
+              touchtype--custom-offset 0)))
+    (touchtype-ui-setup-buffer)))
+
+;;;###autoload
+(defun touchtype-region ()
+  "Start a touchtype session using the active region as source text."
+  (interactive)
+  (unless (use-region-p)
+    (user-error "No active region"))
+  (touchtype-custom (buffer-substring-no-properties
+                     (region-beginning) (region-end))))
+
+;;;###autoload
+(defun touchtype-buffer ()
+  "Start a touchtype session using the entire current buffer as source text."
+  (interactive)
+  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+    (when (string-empty-p (string-trim text))
+      (user-error "Buffer is empty"))
+    (touchtype-custom text)))
+
+;;;###autoload
+(defun touchtype-code (&optional arg)
+  "Start a touchtype session with code snippets.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'code)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-timed (&optional arg)
+  "Start a timed touchtype session.
+With prefix ARG, set the duration in seconds."
+  (interactive "P")
+  (when arg
+    (setq touchtype-session-duration (prefix-numeric-value arg)))
+  (setq touchtype-session-type 'timed)
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
@@ -148,6 +302,10 @@ Do not enable this mode manually; use `touchtype' or one of the
   "Display a summary of all-time touchtype statistics."
   (interactive)
   (touchtype-ui-show-stats))
+
+;;;###autoload
+(defalias 'touchtype-export #'touchtype-stats-export
+  "Export typing statistics to a file.")
 
 (provide 'touchtype)
 
