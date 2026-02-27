@@ -2,6 +2,10 @@
 
 ;; Copyright (C) 2025 Charlie Holland
 
+;; Author: Charlie Holland <mister.chiply@gmail.com>
+;; URL: https://github.com/chiply/touchtype
+;; Package-Requires: ((emacs "29.1"))
+
 ;; This file is not part of GNU Emacs.
 
 ;; This program is free software: you can redistribute it and/or modify
@@ -23,8 +27,6 @@
 ;; the touchtype package.
 
 ;;; Code:
-
-(require 'cl-lib)
 
 ;;;; Customization group
 
@@ -999,7 +1001,8 @@ distribution, and are suitable for typing practice.")
   "Total error count for the current session (never decremented by backspace).")
 
 (defvar touchtype--session-total-keys 0
-  "Total number of keypresses in the current session (never decremented by backspace).")
+  "Total keypresses in the current session.
+Never decremented by backspace.")
 
 (defvar touchtype--session-word-count 0
   "Number of words typed so far in the current session.")
@@ -1007,8 +1010,6 @@ distribution, and are suitable for typing practice.")
 (defvar touchtype--target-start nil
   "Buffer marker at the start of the target text region.")
 
-(defvar touchtype--typed-start nil
-  "Buffer marker at the start of the typed feedback region.")
 
 (defvar touchtype--status-start nil
   "Buffer marker at the start of the status region.")

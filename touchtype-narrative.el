@@ -2,6 +2,10 @@
 
 ;; Copyright (C) 2025 Charlie Holland
 
+;; Author: Charlie Holland <mister.chiply@gmail.com>
+;; URL: https://github.com/chiply/touchtype
+;; Package-Requires: ((emacs "29.1"))
+
 ;; This file is not part of GNU Emacs.
 
 ;; This program is free software: you can redistribute it and/or modify

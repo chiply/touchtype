@@ -2,6 +2,10 @@
 
 ;; Copyright (C) 2025 Charlie Holland
 
+;; Author: Charlie Holland <mister.chiply@gmail.com>
+;; URL: https://github.com/chiply/touchtype
+;; Package-Requires: ((emacs "29.1"))
+
 ;; This file is not part of GNU Emacs.
 
 ;; This program is free software: you can redistribute it and/or modify
@@ -627,15 +631,15 @@ Returns 100.0 when there are fewer than 2 samples."
 
 ;;;; End-session interactive sections
 
-(defvar touchtype--expandable-sections nil
+(defvar touchtype-ui--expandable-sections nil
   "List of section plists for expandable end-session areas.
 Each plist has keys :id, :header, :trunc-items, :full-items,
 :formatter, :is-expanded.")
 
-(defvar touchtype--expandable-area-start nil
+(defvar touchtype-ui--expandable-area-start nil
   "Marker for the start of the expandable sections area.")
 
-(defvar touchtype--expandable-area-end nil
+(defvar touchtype-ui--expandable-area-end nil
   "Marker for the end of the expandable sections area.")
 
 (defun touchtype-ui--render-expandable-sections ()
@@ -643,10 +647,10 @@ Each plist has keys :id, :header, :trunc-items, :full-items,
 Deletes the old content and re-inserts every section, respecting
 each section's :is-expanded flag."
   (let ((inhibit-read-only t))
-    (delete-region touchtype--expandable-area-start
-                   touchtype--expandable-area-end)
-    (goto-char touchtype--expandable-area-start)
-    (dolist (section touchtype--expandable-sections)
+    (delete-region touchtype-ui--expandable-area-start
+                   touchtype-ui--expandable-area-end)
+    (goto-char touchtype-ui--expandable-area-start)
+    (dolist (section touchtype-ui--expandable-sections)
       (let* ((id         (plist-get section :id))
              (header     (plist-get section :header))
              (trunc-items (plist-get section :trunc-items))
@@ -725,7 +729,7 @@ each section's :is-expanded flag."
   (let ((section-id (get-text-property (line-beginning-position)
                                        'touchtype-section-id)))
     (when section-id
-      (let ((section (cl-find section-id touchtype--expandable-sections
+      (let ((section (cl-find section-id touchtype-ui--expandable-sections
                               :key (lambda (s) (plist-get s :id))
                               :test #'string=)))
         (when section
@@ -733,7 +737,7 @@ each section's :is-expanded flag."
                      (not (plist-get section :is-expanded)))
           (touchtype-ui--render-expandable-sections)
           ;; Reposition point on the toggled section's header
-          (goto-char touchtype--expandable-area-start)
+          (goto-char touchtype-ui--expandable-area-start)
           (let ((found nil))
             (while (and (not found) (not (eobp)))
               (if (equal (get-text-property (point) 'touchtype-section-id)
@@ -746,8 +750,7 @@ each section's :is-expanded flag."
   ;; Cancel any active timers
   (touchtype-ui--cancel-session-timer)
   (touchtype-ui--stop-pace-caret)
-  (let* ((samples     touchtype--session-wpm-samples)
-         (total-keys  touchtype--session-total-keys)
+  (let* ((total-keys  touchtype--session-total-keys)
          (total-errs  touchtype--session-errors)
          (corrections touchtype--session-corrections)
          (raw-elapsed (if touchtype--session-start-time
@@ -854,7 +857,7 @@ each section's :is-expanded flag."
                                  (car entry)
                                  (touchtype-stats-get-bigram-confidence
                                   (car entry))))))
-        (setq-local touchtype--expandable-sections
+        (setq-local touchtype-ui--expandable-sections
                     (cl-remove-if-not
                      (lambda (s) (plist-get s :trunc-items))
                      (list
@@ -874,8 +877,8 @@ each section's :is-expanded flag."
                             :trunc-items (seq-take all-weak-tetragrams 5)
                             :full-items all-weak-tetragrams
                             :formatter ngram-fmt :is-expanded nil))))
-        (setq-local touchtype--expandable-area-start (copy-marker (point)))
-        (setq-local touchtype--expandable-area-end (copy-marker (point) t))
+        (setq-local touchtype-ui--expandable-area-start (copy-marker (point)))
+        (setq-local touchtype-ui--expandable-area-end (copy-marker (point) t))
         (touchtype-ui--render-expandable-sections))
       (insert (propertize
                "  TAB: next section  Enter: expand/collapse  r: restart  q: quit\n"
@@ -1141,7 +1144,7 @@ Maps values to bar characters scaled min-to-max."
         (insert "\n")
         (goto-char (point-min))
         (setq buffer-read-only t)
-        (local-set-key (kbd "q") #'kill-this-buffer)))
+        (local-set-key (kbd "q") #'kill-current-buffer)))
     (switch-to-buffer buf)))
 
 (provide 'touchtype-ui)

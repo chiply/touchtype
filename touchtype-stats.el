@@ -2,6 +2,10 @@
 
 ;; Copyright (C) 2025 Charlie Holland
 
+;; Author: Charlie Holland <mister.chiply@gmail.com>
+;; URL: https://github.com/chiply/touchtype
+;; Package-Requires: ((emacs "29.1"))
+
 ;; This file is not part of GNU Emacs.
 
 ;; This program is free software: you can redistribute it and/or modify
@@ -36,6 +40,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'time-date)
 (require 'touchtype-var)
 
 ;;;; In-memory stats store
@@ -427,15 +432,15 @@ Consecutive day: streak + 1.  Gap: streak resets to 1."
                 sessions)))
     (mapconcat #'identity (cons header rows) "\n")))
 
-(defun touchtype-stats-export (format filename)
-  "Export stats to FILENAME in FORMAT (json or csv)."
+(defun touchtype-stats-export (fmt filename)
+  "Export stats to FILENAME in FMT (json or csv)."
   (interactive
    (list (intern (completing-read "Format: " '("json" "csv") nil t))
          (read-file-name "Export to: ")))
-  (let ((content (pcase format
+  (let ((content (pcase fmt
                    ('json (touchtype-stats-export-json))
                    ('csv  (touchtype-stats-export-csv))
-                   (_     (error "Unknown format: %s" format)))))
+                   (_     (error "Unknown format: %s" fmt)))))
     (with-temp-file filename
       (insert content))
     (message "Stats exported to %s" filename)))

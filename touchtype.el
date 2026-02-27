@@ -72,11 +72,6 @@
 (require 'touchtype-ui)
 (require 'touchtype-narrative)
 
-(declare-function touchtype-ui-setup-buffer  "touchtype-ui")
-(declare-function touchtype-ui-show-stats    "touchtype-ui")
-(declare-function touchtype-stats-load       "touchtype-stats")
-(declare-function touchtype-stats-save       "touchtype-stats")
-
 ;;;; Minor mode
 
 ;;;###autoload
