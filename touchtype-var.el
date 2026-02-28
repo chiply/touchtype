@@ -164,10 +164,10 @@ Set to 0 to disable preview."
 
 (defface touchtype-face-correct
   '((((class color) (background dark))
-     :foreground "#a855f7" :weight bold)
+     :foreground "#4ade80")
     (((class color) (background light))
-     :foreground "#7c3aed" :weight bold)
-    (t :foreground "purple" :weight bold))
+     :foreground "#16a34a")
+    (t :foreground "green"))
   "Face for correctly typed characters."
   :group 'touchtype)
 
