@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/chiply/touchtype/compare/v0.1.1...v0.1.2) (2026-02-28)
+
+
+### Bug Fixes
+
+* change correct-character face from purple to green ([42e0597](https://github.com/chiply/touchtype/commit/42e0597896089c4227ec9758a0c273c78c5bacdf))
+
 ## [0.1.1](https://github.com/chiply/touchtype/compare/v0.1.0...v0.1.1) (2026-02-27)
 
 
