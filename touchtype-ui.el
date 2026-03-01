@@ -33,6 +33,8 @@
 (require 'touchtype-stats)
 (require 'touchtype-algo)
 
+(declare-function touchtype-mode "touchtype")
+
 ;;;; Keymap
 
 (defvar touchtype-ui--keymap nil
