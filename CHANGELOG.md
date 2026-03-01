@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/chiply/touchtype/compare/v0.1.2...v0.1.3) (2026-03-01)
+
+
+### Bug Fixes
+
+* add declare-function for touchtype-mode in touchtype-ui ([3b4e819](https://github.com/chiply/touchtype/commit/3b4e819f99ef967e03648eae85d20a88053e1dc8))
+
 ## [0.1.2](https://github.com/chiply/touchtype/compare/v0.1.1...v0.1.2) (2026-02-28)
 
 
