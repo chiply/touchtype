@@ -81,7 +81,15 @@ One of: `progressive', `full-words', `bigram-drill', `letters',
                  (const :tag "Narrative" narrative)
                  (const :tag "Common Words" common-words)
                  (const :tag "Custom Text" custom)
-                 (const :tag "Code" code))
+                 (const :tag "Code" code)
+                 (const :tag "Weak Letters" weak-letters)
+                 (const :tag "Weak Bigrams" weak-bigrams)
+                 (const :tag "Weak Mixed" weak-mixed)
+                 (const :tag "Quote" quote)
+                 (const :tag "Domain Words" domain-words)
+                 (const :tag "Left Hand" left-hand)
+                 (const :tag "Right Hand" right-hand)
+                 (const :tag "Symbol Drill" symbol-drill))
   :group 'touchtype)
 
 (defcustom touchtype-stats-history-length 20
@@ -153,6 +161,16 @@ Set to 0 to disable preview."
 (defcustom touchtype-pace-caret nil
   "When non-nil, show a pace caret moving at `touchtype-target-wpm'."
   :type 'boolean
+  :group 'touchtype)
+
+(defcustom touchtype-weak-letter-count 6
+  "Number of weakest letters to focus on in `weak-letters' mode."
+  :type 'integer
+  :group 'touchtype)
+
+(defcustom touchtype-weak-confidence-threshold 0.80
+  "Confidence threshold below which a letter/ngram is considered weak."
+  :type 'float
   :group 'touchtype)
 
 ;;;; Faces
@@ -349,21 +367,67 @@ Used by `touchtype-algo-ngram-line' for trigram-drill mode.")
   "Ordered list of the 100 most common English tetragrams.
 Used by `touchtype-algo-ngram-line' for tetragram-drill mode.")
 
+(defconst touchtype--code-snippets-by-language
+  '((python . ["def main():" "return None" "if x > 0:" "for i in range(n):"
+               "while True:" "import os" "class Foo:" "self.value = x"
+               "def __init__(self):" "yield from items" "with open(f) as fp:"
+               "try: x = int(s)" "except ValueError:" "raise RuntimeError(msg)"
+               "from typing import List" "lambda x: x * 2" "@staticmethod"
+               "if __name__ == '__main__':"])
+    (rust . ["fn main() {" "let mut v = Vec::new();" "match x {" "impl Trait for S {"
+             "pub fn new() -> Self {" "println!(\"hello\");" "Ok(())"
+             "use std::collections::HashMap;" "enum Color { Red, Blue }"
+             "struct Point { x: f64 }" "fn foo(s: &str) -> Result<()> {"
+             "if let Some(v) = opt {" "for item in &list {" "#[derive(Debug)]"
+             "Box::new(value)" "Arc::clone(&data)" "async fn fetch() -> Result<()> {"])
+    (go . ["func main() {" "if err != nil {" "fmt.Println(x)" "go func() {"
+            "defer f.Close()" "type Server struct {" "func (s *Server) Run() {"
+            "ch := make(chan int)" "select { case v := <-ch:" "for _, v := range items {"
+            "import \"fmt\"" "var wg sync.WaitGroup" "return nil, fmt.Errorf(msg)"
+            "ctx, cancel := context.WithCancel(ctx)" "map[string]interface{}{}"])
+    (javascript . ["const x = 42;" "let arr = [1, 2, 3];" "console.log(x);"
+                   "async function f() {" "return new Promise();" "export default {"
+                   "const fn = () => {" "try { await fetch(url) }"
+                   "catch (err) { throw err }" "Object.keys(obj).forEach(k => {"
+                   "const { a, b } = obj;" "import React from 'react';"
+                   "module.exports = fn;" "setTimeout(() => {}, 100);"
+                   "arr.map(x => x * 2)" "new Map([['a', 1]])"])
+    (elisp . ["(defun foo (x)" "(let ((a 1)))" "(setq x 42)"
+              "(lambda (x) (* x x))" "(require 'cl-lib)" "(provide 'my-pkg)"
+              "(defvar my-var nil)" "(defcustom opt 42" "(interactive \"P\")"
+              "(with-current-buffer buf" "(save-excursion (goto-char (point-min)))"
+              "(cl-loop for i below n collect i)" "(pcase x ('a 1) ('b 2))"
+              "(condition-case err" "(mapcar #'car alist)" "(add-hook 'mode-hook #'fn)"])
+    (bash . ["#!/bin/bash" "if [ -f $1 ]; then" "echo \"$HOME\""
+             "grep -r 'TODO'" "for f in *.txt; do" "while read -r line; do"
+             "case $1 in" "function cleanup() {" "trap cleanup EXIT"
+             "set -euo pipefail" "local var=\"${1:-default}\""
+             "find . -name '*.log' -delete" "curl -s $URL | jq '.data'"
+             "tar -czf archive.tar.gz dir/" "chmod +x script.sh"])
+    (sql . ["SELECT * FROM users;" "INSERT INTO t (a, b)" "CREATE TABLE t ("
+            "WHERE id = $1" "JOIN orders ON users.id = orders.uid"
+            "GROUP BY category HAVING count(*) > 5" "ORDER BY created_at DESC"
+            "ALTER TABLE t ADD COLUMN c TEXT;" "UPDATE t SET x = 1 WHERE id = 2;"
+            "DELETE FROM t WHERE expired = true;" "CREATE INDEX idx ON t (col);"
+            "BEGIN; COMMIT; ROLLBACK;" "EXPLAIN ANALYZE SELECT" "COALESCE(a, b, 0)"
+            "CASE WHEN x > 0 THEN 'yes' ELSE 'no' END"])
+    (c . ["int main() {" "printf(\"%d\\n\", x);" "#include <stdio.h>"
+           "struct Node {" "void *ptr = NULL;" "typedef struct { int x; } Point;"
+           "char *buf = malloc(256);" "if (ptr == NULL) return -1;"
+           "for (int i = 0; i < n; i++) {" "while (*p != '\\0') p++;"
+           "free(buf); buf = NULL;" "#define MAX(a, b) ((a) > (b) ? (a) : (b))"
+           "size_t len = strlen(s);" "memcpy(dst, src, n);"
+           "switch (op) { case '+':"])
+    )
+  "Alist mapping language symbols to vectors of code snippets.")
+
 (defconst touchtype--code-snippets
-  ["def main():" "return None" "if x > 0:" "for i in range(n):"
-   "while True:" "import os" "class Foo:" "self.value = x"
-   "fn main() {" "let mut v = Vec::new();" "match x {" "impl Trait for S {"
-   "pub fn new() -> Self {" "println!(\"hello\");" "Ok(())"
-   "func main() {" "if err != nil {" "fmt.Println(x)" "go func() {"
-   "defer f.Close()" "const x = 42;" "let arr = [1, 2, 3];"
-   "console.log(x);" "async function f() {" "return new Promise();"
-   "export default {" "(defun foo (x)" "(let ((a 1)))" "(setq x 42)"
-   "(lambda (x) (* x x))" "#!/bin/bash" "if [ -f $1 ]; then"
-   "echo \"$HOME\"" "grep -r 'TODO'" "SELECT * FROM users;"
-   "INSERT INTO t (a, b)" "CREATE TABLE t (" "WHERE id = $1"
-   "int main() {" "printf(\"%d\\n\", x);" "#include <stdio.h>"
-   "struct Node {" "void *ptr = NULL;"]
-  "Vector of common code snippets for `code' typing mode.")
+  (apply #'vconcat
+         (mapcar #'cdr touchtype--code-snippets-by-language))
+  "Vector of all code snippets (computed from per-language collections).")
+
+(defvar touchtype--code-language nil
+  "Currently selected language for filtered `code' mode, or nil for all.")
 
 (defconst touchtype--builtin-words
   (vconcat
@@ -968,6 +1032,320 @@ Used by `touchtype-algo-ngram-line' for tetragram-drill mode.")
   "Vector of ~4258 common English words for `full-words' mode.
 Words are selected for variety of letter patterns and length
 distribution, and are suitable for typing practice.")
+
+;;;; Quotes
+
+(defconst touchtype--quotes
+  ["the only way to do great work is to love what you do"
+   "in the middle of difficulty lies opportunity"
+   "it does not matter how slowly you go as long as you do not stop"
+   "life is what happens when you are busy making other plans"
+   "the unexamined life is not worth living"
+   "to be or not to be that is the question"
+   "i think therefore i am"
+   "the only thing we have to fear is fear itself"
+   "be the change you wish to see in the world"
+   "knowledge is power"
+   "the pen is mightier than the sword"
+   "those who cannot remember the past are condemned to repeat it"
+   "the greatest glory in living lies not in never falling but in rising every time we fall"
+   "the way to get started is to quit talking and begin doing"
+   "your time is limited so do not waste it living someone elses life"
+   "if life were predictable it would cease to be life and be without flavor"
+   "spread love everywhere you go let no one ever come to you without leaving happier"
+   "when you reach the end of your rope tie a knot in it and hang on"
+   "always remember that you are absolutely unique just like everyone else"
+   "the future belongs to those who believe in the beauty of their dreams"
+   "tell me and i forget teach me and i remember involve me and i learn"
+   "it is during our darkest moments that we must focus to see the light"
+   "whoever is happy will make others happy too"
+   "you will face many defeats in life but never let yourself be defeated"
+   "the greatest wealth is to live content with little"
+   "not all those who wander are lost"
+   "the only impossible journey is the one you never begin"
+   "we are what we repeatedly do excellence then is not an act but a habit"
+   "imagination is more important than knowledge"
+   "stay hungry stay foolish"
+   "simplicity is the ultimate sophistication"
+   "the best way to predict the future is to invent it"
+   "do what you can with what you have where you are"
+   "success is not final failure is not fatal it is the courage to continue that counts"
+   "a room without books is like a body without a soul"
+   "it always seems impossible until it is done"
+   "nothing is impossible the word itself says i am possible"
+   "the only limit to our realization of tomorrow will be our doubts of today"
+   "do not go where the path may lead go instead where there is no path and leave a trail"
+   "education is the most powerful weapon which you can use to change the world"
+   "in three words i can sum up everything i learned about life it goes on"
+   "life is really simple but we insist on making it complicated"
+   "the purpose of our lives is to be happy"
+   "get busy living or get busy dying"
+   "you only live once but if you do it right once is enough"
+   "many of lifes failures are people who did not realize how close they were to success"
+   "if you look at what you have in life you will always have more"
+   "if you set your goals ridiculously high and it is a failure you will fail above everyone else"
+   "life is a succession of lessons which must be lived to be understood"
+   "the mind is everything what you think you become"]
+  "Vector of famous quotes for `quote' typing mode.")
+
+;;;; Domain word lists
+
+(defconst touchtype--domain-words
+  '((medical . ["diagnosis" "prognosis" "symptom" "treatment" "therapy" "chronic"
+                "acute" "benign" "malignant" "biopsy" "catheter" "suture"
+                "anesthesia" "antibody" "antigen" "pathogen" "syndrome" "lesion"
+                "fracture" "hemorrhage" "inflammation" "prescription" "dosage"
+                "incision" "transfusion" "ultrasound" "radiology" "oncology"
+                "cardiology" "neurology" "orthopedic" "pediatric" "geriatric"
+                "obstetric" "dermatology" "endoscopy" "metabolic" "vascular"
+                "pulmonary" "hepatic" "renal" "adrenal" "thyroid" "pancreatic"
+                "cerebral" "spinal" "arterial" "venous" "platelet"])
+    (legal . ["plaintiff" "defendant" "counsel" "verdict" "testimony" "statute"
+              "litigation" "arbitration" "deposition" "jurisdiction" "precedent"
+              "indictment" "arraignment" "acquittal" "appellant" "adjudicate"
+              "allegation" "amendment" "affidavit" "subpoena" "injunction"
+              "settlement" "probation" "parole" "felony" "misdemeanor"
+              "compliance" "liability" "negligence" "tortious" "fiduciary"
+              "contractual" "stipulation" "magistrate" "tribunal" "habeas"
+              "mandamus" "certiorari" "jurisprudence" "culpable" "exonerate"
+              "prosecute" "mitigate" "adjudicate" "rescind" "ratify"
+              "constitutional" "statutory" "regulatory" "judicial" "appellate"])
+    (programming . ["algorithm" "variable" "function" "parameter" "argument"
+                    "recursion" "iteration" "boolean" "integer" "string"
+                    "array" "hashmap" "pointer" "reference" "immutable"
+                    "compile" "runtime" "debugger" "exception" "assertion"
+                    "callback" "closure" "interface" "abstract" "polymorphism"
+                    "inheritance" "encapsulation" "namespace" "dependency"
+                    "deployment" "container" "middleware" "endpoint" "serializer"
+                    "asynchronous" "concurrent" "deadlock" "semaphore" "mutex"
+                    "pipeline" "refactor" "linter" "formatter" "transpiler"
+                    "bytecode" "operand" "register" "allocator" "garbage"
+                    "collection" "profiler" "benchmark" "throughput" "latency"]))
+  "Alist mapping domain names to vectors of domain-specific terms.")
+
+(defvar touchtype--domain-selection nil
+  "Currently selected domain for `domain-words' mode.")
+
+;;;; Hand key maps per layout
+
+(defconst touchtype--qwerty-left-hand "qwertasdfgzxcvb"
+  "Left-hand keys for QWERTY layout.")
+
+(defconst touchtype--qwerty-right-hand "yuiophjklnm"
+  "Right-hand keys for QWERTY layout.")
+
+(defconst touchtype--dvorak-left-hand "aoeuidhtns"
+  "Left-hand keys for Dvorak layout.")
+
+(defconst touchtype--dvorak-right-hand "qjkxbmwvzypfgcrl"
+  "Right-hand keys for Dvorak layout.")
+
+(defconst touchtype--colemak-left-hand "qwfpgarstdzxcvb"
+  "Left-hand keys for Colemak layout.")
+
+(defconst touchtype--colemak-right-hand "jluyneiohmk"
+  "Right-hand keys for Colemak layout.")
+
+(defconst touchtype--workman-left-hand "qdrwbashtgzxmcv"
+  "Left-hand keys for Workman layout.")
+
+(defconst touchtype--workman-right-hand "jfupneioylk"
+  "Right-hand keys for Workman layout.")
+
+;;;; Keyboard rows per layout (for heatmap rendering)
+
+(defconst touchtype--qwerty-keyboard-rows
+  '("qwertyuiop" "asdfghjkl" "zxcvbnm")
+  "QWERTY keyboard rows (top, home, bottom).")
+
+(defconst touchtype--dvorak-keyboard-rows
+  '("pyfgcrl" "aoeuidhtns" "qjkxbmwvz")
+  "Dvorak keyboard rows.")
+
+(defconst touchtype--colemak-keyboard-rows
+  '("qwfpgjluy" "arstdhneio" "zxcvbkm")
+  "Colemak keyboard rows.")
+
+(defconst touchtype--workman-keyboard-rows
+  '("qdrwbjfup" "ashtgyneoi" "zxmcvkl")
+  "Workman keyboard rows.")
+
+;;;; Heatmap faces
+
+(defface touchtype-face-heatmap-cold
+  '((((class color) (background dark))
+     :foreground "#6699cc")
+    (((class color) (background light))
+     :foreground "#336699")
+    (t :foreground "blue"))
+  "Face for heatmap keys with no data or very low confidence."
+  :group 'touchtype)
+
+(defface touchtype-face-heatmap-struggling
+  '((((class color) (background dark))
+     :foreground "#ff6666")
+    (((class color) (background light))
+     :foreground "#cc3333")
+    (t :foreground "red"))
+  "Face for heatmap keys with confidence < 0.3."
+  :group 'touchtype)
+
+(defface touchtype-face-heatmap-developing
+  '((((class color) (background dark))
+     :foreground "#ffcc00")
+    (((class color) (background light))
+     :foreground "#cc9900")
+    (t :foreground "yellow"))
+  "Face for heatmap keys with confidence 0.3-0.6."
+  :group 'touchtype)
+
+(defface touchtype-face-heatmap-good
+  '((((class color) (background dark))
+     :foreground "#4ade80")
+    (((class color) (background light))
+     :foreground "#16a34a")
+    (t :foreground "green"))
+  "Face for heatmap keys with confidence >= 0.6."
+  :group 'touchtype)
+
+;;;; Per-finger maps
+
+(defconst touchtype--qwerty-finger-map
+  '((?q . left-pinky) (?a . left-pinky) (?z . left-pinky)
+    (?w . left-ring)  (?s . left-ring)  (?x . left-ring)
+    (?e . left-middle) (?d . left-middle) (?c . left-middle)
+    (?r . left-index) (?f . left-index) (?v . left-index)
+    (?t . left-index) (?g . left-index) (?b . left-index)
+    (?y . right-index) (?h . right-index) (?n . right-index)
+    (?u . right-index) (?j . right-index) (?m . right-index)
+    (?i . right-middle) (?k . right-middle)
+    (?o . right-ring) (?l . right-ring)
+    (?p . right-pinky))
+  "QWERTY finger map: (char . finger-symbol).")
+
+(defconst touchtype--dvorak-finger-map
+  '((?p . left-pinky) (?a . left-pinky) (?q . left-pinky)
+    (?y . left-ring) (?o . left-ring) (?j . left-ring)
+    (?f . left-middle) (?e . left-middle) (?k . left-middle)
+    (?g . left-index) (?u . left-index) (?x . left-index)
+    (?c . left-index) (?i . left-index) (?b . left-index)
+    (?r . right-index) (?d . right-index) (?m . right-index)
+    (?l . right-index) (?h . right-index) (?w . right-index)
+    (?t . right-middle) (?n . right-middle) (?v . right-middle)
+    (?s . right-ring) (?z . right-ring)
+    (?\; . right-pinky))
+  "Dvorak finger map.")
+
+(defconst touchtype--colemak-finger-map
+  '((?q . left-pinky) (?a . left-pinky) (?z . left-pinky)
+    (?w . left-ring) (?r . left-ring) (?x . left-ring)
+    (?f . left-middle) (?s . left-middle) (?c . left-middle)
+    (?p . left-index) (?t . left-index) (?v . left-index)
+    (?g . left-index) (?d . left-index) (?b . left-index)
+    (?j . right-index) (?h . right-index) (?k . right-index)
+    (?l . right-index) (?n . right-index) (?m . right-index)
+    (?u . right-middle) (?e . right-middle)
+    (?y . right-ring) (?i . right-ring)
+    (?\; . right-pinky) (?o . right-pinky))
+  "Colemak finger map.")
+
+(defconst touchtype--workman-finger-map
+  '((?q . left-pinky) (?a . left-pinky) (?z . left-pinky)
+    (?d . left-ring) (?s . left-ring) (?x . left-ring)
+    (?r . left-middle) (?h . left-middle) (?m . left-middle)
+    (?w . left-index) (?t . left-index) (?c . left-index)
+    (?b . left-index) (?g . left-index) (?v . left-index)
+    (?j . right-index) (?y . right-index) (?k . right-index)
+    (?f . right-index) (?n . right-index) (?l . right-index)
+    (?u . right-middle) (?e . right-middle)
+    (?p . right-ring) (?o . right-ring) (?i . right-ring))
+  "Workman finger map.")
+
+(defconst touchtype--finger-names
+  '((left-pinky  . "L Pinky")
+    (left-ring   . "L Ring")
+    (left-middle . "L Middle")
+    (left-index  . "L Index")
+    (right-index . "R Index")
+    (right-middle . "R Middle")
+    (right-ring  . "R Ring")
+    (right-pinky . "R Pinky"))
+  "Display names for finger symbols.")
+
+;;;; Rolling average window
+
+(defcustom touchtype-rolling-average-window 10
+  "Number of recent sessions to use for rolling average in delta display."
+  :type 'integer
+  :group 'touchtype)
+
+;;;; Achievement definitions
+
+(defconst touchtype--achievements
+  '((:id first-session :name "First Steps" :desc "Complete your first typing session")
+    (:id speed-30 :name "Warming Up" :desc "Reach 30 WPM in a session")
+    (:id speed-50 :name "Cruising" :desc "Reach 50 WPM in a session")
+    (:id speed-70 :name "Speed Demon" :desc "Reach 70 WPM in a session")
+    (:id speed-100 :name "Lightning Fingers" :desc "Reach 100 WPM in a session")
+    (:id accuracy-95 :name "Sharpshooter" :desc "Achieve 95% accuracy in a session")
+    (:id accuracy-99 :name "Precision Master" :desc "Achieve 99% accuracy in a session")
+    (:id accuracy-100 :name "Perfectionist" :desc "Achieve 100% accuracy in a session")
+    (:id streak-7 :name "Week Warrior" :desc "Maintain a 7-day practice streak")
+    (:id streak-30 :name "Monthly Master" :desc "Maintain a 30-day practice streak")
+    (:id sessions-10 :name "Getting Started" :desc "Complete 10 sessions")
+    (:id sessions-50 :name "Dedicated" :desc "Complete 50 sessions")
+    (:id sessions-100 :name "Centurion" :desc "Complete 100 sessions")
+    (:id all-keys :name "Full Keyboard" :desc "Unlock all 26 keys in progressive mode")
+    (:id practice-1h :name "Hour of Power" :desc "Accumulate 1 hour of practice")
+    (:id practice-10h :name "Tenacious" :desc "Accumulate 10 hours of practice"))
+  "List of achievement plists with :id, :name, and :desc.")
+
+;;;; XP and level thresholds
+
+(defconst touchtype--xp-level-thresholds
+  [0 100 250 500 850 1300 1900 2600 3500 4600
+   5900 7500 9400 11600 14200 17200 20700 24700 29300 34500
+   40400 47000 54400 62600 71700 81800]
+  "XP thresholds for each level (26 levels, index = level).")
+
+(defconst touchtype--level-titles
+  ["Novice" "Beginner" "Apprentice" "Learner" "Student"
+   "Practitioner" "Adept" "Skilled" "Proficient" "Expert"
+   "Veteran" "Master" "Grandmaster" "Elite" "Champion"
+   "Virtuoso" "Prodigy" "Sage" "Legend" "Mythic"
+   "Transcendent" "Ascendant" "Paragon" "Titan" "Apex" "Pinnacle"]
+  "Title for each level (26 levels).")
+
+;;;; Difficulty tiers
+
+(defcustom touchtype-difficulty 'normal
+  "Difficulty tier for typing sessions.
+`normal': errors shown but typing continues.
+`expert': session fails if a word has errors (checked at word boundary).
+`master': session fails on the first incorrect keystroke."
+  :type '(choice (const :tag "Normal" normal)
+                 (const :tag "Expert" expert)
+                 (const :tag "Master" master))
+  :group 'touchtype)
+
+;;;; Pause state
+
+(defvar touchtype--paused nil
+  "Non-nil when the session is paused.")
+
+(defvar touchtype--pause-start-time nil
+  "Float-time when the current pause began.")
+
+(defvar touchtype--pause-overlay nil
+  "Overlay displaying the PAUSED message.")
+
+;;;; Quote passage state
+
+(defvar touchtype--quote-passage nil
+  "The current quote passage text being typed.")
+
+(defvar touchtype--quote-offset 0
+  "Current read offset into `touchtype--quote-passage'.")
 
 ;;;; Buffer-local state variables
 ;; These are set buffer-local in the *touchtype* buffer.

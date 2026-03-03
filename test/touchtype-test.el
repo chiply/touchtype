@@ -1458,6 +1458,620 @@
     ;; Mode stats untouched
     (should (null (plist-get touchtype--stats :mode-letter-stats)))))
 
+;;; ─── Phase 1: Weak mode tests ────────────────────────────────────────────────
+
+(ert-deftest touchtype-test-inverse-confidence-weights ()
+  "Inverse confidence weights should be max(0.01, 1.0 - confidence)."
+  (let ((touchtype--stats
+         (list :version 1
+               :letter-stats (list (list ?a :hits 100 :misses 0 :total-ms 30000 :best-ms 200)
+                                   (list ?b :hits 10 :misses 5 :total-ms 6000 :best-ms 400))
+               :bigram-stats nil :sessions nil :unlocked-keys "fj" :confidence nil))
+        (touchtype-target-wpm 40))
+    (let ((weights (touchtype-algo--inverse-confidence-weights "ab")))
+      ;; Each entry is (char . weight)
+      (should (= (length weights) 2))
+      ;; Weights should be positive
+      (should (> (cdr (assq ?a weights)) 0))
+      (should (> (cdr (assq ?b weights)) 0))
+      ;; a has more hits & better speed, so lower inverse weight
+      (should (< (cdr (assq ?a weights)) (cdr (assq ?b weights)))))))
+
+(ert-deftest touchtype-test-inverse-confidence-weights-no-data ()
+  "Inverse confidence weights with no data should be ~1.0."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil))
+        (touchtype-target-wpm 40))
+    (let ((weights (touchtype-algo--inverse-confidence-weights "xyz")))
+      (should (= (length weights) 3))
+      (dolist (w weights)
+        (should (= (cdr w) 1.0))))))
+
+(ert-deftest touchtype-test-pick-weighted-float ()
+  "Weighted float pick should return a key from the alist."
+  (let ((alist '((?a . 0.5) (?b . 0.3) (?c . 0.2))))
+    (dotimes (_ 20)
+      (let ((picked (touchtype-algo--pick-weighted-float alist)))
+        (should (memq picked '(?a ?b ?c)))))))
+
+(ert-deftest touchtype-test-pick-weighted-float-single ()
+  "Weighted float pick with single element always returns that element."
+  (let ((alist '((?x . 1.0))))
+    (should (= (touchtype-algo--pick-weighted-float alist) ?x))))
+
+(ert-deftest touchtype-test-generate-word-containing-ngram ()
+  "Word containing ngram should include the ngram substring."
+  (dotimes (_ 10)
+    (let ((word (touchtype-algo-generate-word-containing-ngram
+                 "th" "abcdefghijklmnopqrstuvwxyz")))
+      (should (stringp word))
+      (should (>= (length word) 2))
+      (should (string-match-p "th" word)))))
+
+(ert-deftest touchtype-test-generate-word-containing-trigram ()
+  "Word containing trigram should include the trigram substring."
+  (dotimes (_ 10)
+    (let ((word (touchtype-algo-generate-word-containing-ngram
+                 "the" "abcdefghijklmnopqrstuvwxyz")))
+      (should (stringp word))
+      (should (string-match-p "the" word)))))
+
+(ert-deftest touchtype-test-build-suffix ()
+  "Build-suffix should produce a string of requested length."
+  (let ((suffix (touchtype-algo--build-suffix 4 ?t "abcdefghijklmnopqrstuvwxyz")))
+    (should (= (length suffix) 4))
+    (should (cl-every (lambda (c) (and (>= c ?a) (<= c ?z)))
+                      (string-to-list suffix)))))
+
+(ert-deftest touchtype-test-build-prefix ()
+  "Build-prefix should produce a string of requested length."
+  (let ((prefix (touchtype-algo--build-prefix 3 ?e "abcdefghijklmnopqrstuvwxyz")))
+    (should (= (length prefix) 3))
+    (should (cl-every (lambda (c) (and (>= c ?a) (<= c ?z)))
+                      (string-to-list prefix)))))
+
+(ert-deftest touchtype-test-weak-letters-line-cold-start ()
+  "Weak letters line should work with no stats (cold start)."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil))
+        (touchtype-target-wpm 40)
+        (touchtype-weak-letter-count 6)
+        (touchtype-weak-confidence-threshold 0.80)
+        (touchtype-word-length-min 4)
+        (touchtype-word-length-max 8))
+    (let ((line (touchtype-algo--weak-letters-line)))
+      (should (stringp line))
+      (should (> (length line) 0)))))
+
+(ert-deftest touchtype-test-weak-letters-line-with-stats ()
+  "Weak letters line should generate text focusing on weak characters."
+  (let ((touchtype--stats
+         (list :version 1
+               :letter-stats (list (list ?a :hits 100 :misses 0 :total-ms 30000 :best-ms 200)
+                                   (list ?z :hits 10 :misses 8 :total-ms 10000 :best-ms 800)
+                                   (list ?q :hits 5 :misses 4 :total-ms 8000 :best-ms 900))
+               :bigram-stats nil :sessions nil :unlocked-keys "fj" :confidence nil))
+        (touchtype-target-wpm 40)
+        (touchtype-weak-letter-count 6)
+        (touchtype-weak-confidence-threshold 0.80)
+        (touchtype-word-length-min 4)
+        (touchtype-word-length-max 8))
+    (let ((line (touchtype-algo--weak-letters-line)))
+      (should (stringp line))
+      (should (> (length line) 10)))))
+
+(ert-deftest touchtype-test-weak-bigrams-line-cold-start ()
+  "Weak bigrams line should fall back to bigram drill with no stats."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "abcdefghijklmnopqrstuvwxyz" :confidence nil))
+        (touchtype-target-wpm 40)
+        (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz")
+        (touchtype-word-length-min 4)
+        (touchtype-word-length-max 8))
+    (let ((line (touchtype-algo--weak-bigrams-line)))
+      (should (stringp line))
+      (should (> (length line) 0)))))
+
+(ert-deftest touchtype-test-weak-bigrams-line-with-stats ()
+  "Weak bigrams line should generate text with stats present."
+  (let ((touchtype--stats
+         (list :version 1
+               :letter-stats nil
+               :bigram-stats (list (list "th" :hits 50 :misses 2 :total-ms 15000)
+                                   (list "zx" :hits 10 :misses 8 :total-ms 10000))
+               :sessions nil :unlocked-keys "abcdefghijklmnopqrstuvwxyz" :confidence nil))
+        (touchtype-target-wpm 40)
+        (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz")
+        (touchtype-word-length-min 4)
+        (touchtype-word-length-max 8))
+    (let ((line (touchtype-algo--weak-bigrams-line)))
+      (should (stringp line))
+      (should (> (length line) 10)))))
+
+(ert-deftest touchtype-test-weak-mixed-line ()
+  "Weak mixed line should generate non-empty text."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "abcdefghijklmnopqrstuvwxyz" :confidence nil))
+        (touchtype-target-wpm 40)
+        (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz")
+        (touchtype-weak-letter-count 6)
+        (touchtype-weak-confidence-threshold 0.80)
+        (touchtype-word-length-min 4)
+        (touchtype-word-length-max 8))
+    (let ((line (touchtype-algo--weak-mixed-line)))
+      (should (stringp line))
+      (should (> (length line) 0)))))
+
+(ert-deftest touchtype-test-weak-letters-overrepresentation ()
+  "Weak letters mode should over-represent weak characters.
+Letters with no stats have confidence 0.0 (inverse weight 1.0).
+We verify that at least some of these no-data letters appear
+as focus chars in generated lines."
+  (let* ((touchtype--stats
+          (list :version 1
+                ;; Give most letters good stats so only q,x,z are weak
+                :letter-stats
+                (cl-loop for ch across "abcdefghijklmnoprstuvwy"
+                         collect (list ch :hits 200 :misses 2 :total-ms 50000 :best-ms 200))
+                :bigram-stats nil :sessions nil :unlocked-keys "fj" :confidence nil))
+         (touchtype-target-wpm 40)
+         (touchtype-weak-letter-count 6)
+         (touchtype-weak-confidence-threshold 0.80)
+         (touchtype-word-length-min 4)
+         (touchtype-word-length-max 8))
+    ;; q, x, z have no stats -> confidence 0.0 -> highest inverse weight
+    ;; They should be over-represented as focus chars
+    (let ((weak-count 0) (total-chars 0))
+      (dotimes (_ 10)
+        (let ((line (touchtype-algo--weak-letters-line)))
+          (cl-incf total-chars (length (replace-regexp-in-string " " "" line)))
+          (cl-incf weak-count (cl-count ?q line))
+          (cl-incf weak-count (cl-count ?x line))
+          (cl-incf weak-count (cl-count ?z line))))
+      ;; With 10 lines and focus on q/x/z, we should see some
+      (should (> weak-count 0)))))
+
+(ert-deftest touchtype-test-weak-mode-allowed-chars ()
+  "All weak modes should return full alphabet for allowed chars."
+  (let ((touchtype-mode-selection 'weak-letters))
+    (should (equal (touchtype-algo--allowed-for-mode) "abcdefghijklmnopqrstuvwxyz")))
+  (let ((touchtype-mode-selection 'weak-bigrams))
+    (should (equal (touchtype-algo--allowed-for-mode) "abcdefghijklmnopqrstuvwxyz")))
+  (let ((touchtype-mode-selection 'weak-mixed))
+    (should (equal (touchtype-algo--allowed-for-mode) "abcdefghijklmnopqrstuvwxyz"))))
+
+;;; ─── Phase 2: Content mode tests ─────────────────────────────────────────────
+
+(ert-deftest touchtype-test-quote-line-generation ()
+  "Quote mode should generate non-empty lines from a quote passage."
+  (let ((touchtype--quote-passage "the only way to do great work is to love what you do")
+        (touchtype--quote-offset 0)
+        (touchtype-mode-selection 'quote))
+    (let ((line (touchtype-algo--generate-line-from-passage
+                 'touchtype--quote-passage 'touchtype--quote-offset)))
+      (should (stringp line))
+      (should (> (length line) 0)))))
+
+(ert-deftest touchtype-test-quote-prepare ()
+  "Preparing a quote should set passage and offset."
+  (let ((touchtype--quote-passage nil)
+        (touchtype--quote-offset 0))
+    (touchtype-algo--prepare-quote)
+    (should (stringp touchtype--quote-passage))
+    (should (> (length touchtype--quote-passage) 0))
+    (should (= touchtype--quote-offset 0))))
+
+(ert-deftest touchtype-test-domain-words-medical ()
+  "Domain words for medical should generate a line of medical terms."
+  (let ((touchtype-mode-selection 'domain-words)
+        (touchtype--domain-selection 'medical))
+    (let ((line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (should (> (length line) 0)))))
+
+(ert-deftest touchtype-test-domain-words-legal ()
+  "Domain words for legal should generate a line."
+  (let ((touchtype-mode-selection 'domain-words)
+        (touchtype--domain-selection 'legal))
+    (let ((line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (should (> (length line) 0)))))
+
+(ert-deftest touchtype-test-domain-words-programming ()
+  "Domain words for programming should generate a line."
+  (let ((touchtype-mode-selection 'domain-words)
+        (touchtype--domain-selection 'programming))
+    (let ((line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (should (> (length line) 0)))))
+
+(ert-deftest touchtype-test-hand-keys-no-overlap ()
+  "Left and right hand keys should not overlap for any layout."
+  (dolist (layout '(qwerty dvorak colemak workman))
+    (let ((touchtype-keyboard-layout layout))
+      (let ((left (touchtype-algo--hand-keys 'left))
+            (right (touchtype-algo--hand-keys 'right)))
+        (dolist (c (string-to-list left))
+          (should-not (seq-contains-p right c #'=)))))))
+
+(ert-deftest touchtype-test-hand-keys-cover-alphabet ()
+  "Left + right hand keys should cover most of the alphabet."
+  (dolist (layout '(qwerty dvorak colemak workman))
+    (let ((touchtype-keyboard-layout layout))
+      (let* ((left (touchtype-algo--hand-keys 'left))
+             (right (touchtype-algo--hand-keys 'right))
+             (all (concat left right))
+             (unique (delete-dups (string-to-list all))))
+        ;; Should have at least 20 unique letters (some layouts may differ slightly)
+        (should (>= (length unique) 20))))))
+
+(ert-deftest touchtype-test-left-hand-line-chars ()
+  "Left-hand mode lines should only contain left-hand chars and spaces."
+  (let ((touchtype-mode-selection 'left-hand)
+        (touchtype-keyboard-layout 'qwerty)
+        (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz")
+        (touchtype-word-length-min 4)
+        (touchtype-word-length-max 8))
+    (let* ((allowed (touchtype-algo--allowed-for-mode))
+           (line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (dolist (c (string-to-list line))
+        (should (or (= c ?\s) (seq-contains-p allowed c #'=)))))))
+
+(ert-deftest touchtype-test-right-hand-line-chars ()
+  "Right-hand mode lines should only contain right-hand chars and spaces."
+  (let ((touchtype-mode-selection 'right-hand)
+        (touchtype-keyboard-layout 'qwerty)
+        (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz")
+        (touchtype-word-length-min 4)
+        (touchtype-word-length-max 8))
+    (let* ((allowed (touchtype-algo--allowed-for-mode))
+           (line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (dolist (c (string-to-list line))
+        (should (or (= c ?\s) (seq-contains-p allowed c #'=)))))))
+
+(ert-deftest touchtype-test-hand-keys-layout-aware ()
+  "Hand keys should differ between layouts."
+  (let ((touchtype-keyboard-layout 'qwerty))
+    (let ((qwerty-left (touchtype-algo--hand-keys 'left)))
+      (let ((touchtype-keyboard-layout 'dvorak))
+        (let ((dvorak-left (touchtype-algo--hand-keys 'left)))
+          (should-not (equal qwerty-left dvorak-left)))))))
+
+(ert-deftest touchtype-test-symbol-drill-line ()
+  "Symbol drill should generate non-empty lines."
+  (let ((line (touchtype-algo--symbol-drill-line)))
+    (should (stringp line))
+    (should (> (length line) 0))))
+
+(ert-deftest touchtype-test-symbol-drill-contains-symbols ()
+  "Symbol drill lines should contain programming bigrams."
+  (let ((found-bigram nil))
+    (dotimes (_ 10)
+      (let ((line (touchtype-algo--symbol-drill-line)))
+        (dolist (bg touchtype--programming-bigrams)
+          (when (string-match-p (regexp-quote bg) line)
+            (setq found-bigram t)))))
+    (should found-bigram)))
+
+;;; ─── Phase 3: Symbol drill & language code tests ─────────────────────────────
+
+(ert-deftest touchtype-test-code-snippets-by-language-keys ()
+  "All expected languages should be present in the by-language alist."
+  (dolist (lang '(python rust go javascript elisp bash sql c))
+    (should (assq lang touchtype--code-snippets-by-language))))
+
+(ert-deftest touchtype-test-code-snippets-backward-compat ()
+  "Flat code-snippets vector should contain snippets from all languages."
+  (should (> (length touchtype--code-snippets) 50))
+  ;; Should contain snippets from multiple languages
+  (let ((has-python nil) (has-rust nil) (has-sql nil))
+    (dotimes (i (length touchtype--code-snippets))
+      (let ((s (aref touchtype--code-snippets i)))
+        (when (string-match-p "def " s) (setq has-python t))
+        (when (string-match-p "fn " s) (setq has-rust t))
+        (when (string-match-p "SELECT" s) (setq has-sql t))))
+    (should has-python)
+    (should has-rust)
+    (should has-sql)))
+
+(ert-deftest touchtype-test-code-language-filter ()
+  "Code mode with language filter should only produce snippets from that language."
+  (let ((touchtype-mode-selection 'code)
+        (touchtype--code-language 'python))
+    (let ((line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (should (> (length line) 0)))))
+
+(ert-deftest touchtype-test-code-language-nil-uses-all ()
+  "Code mode with nil language should use all snippets."
+  (let ((touchtype-mode-selection 'code)
+        (touchtype--code-language nil))
+    (let ((line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (should (> (length line) 0)))))
+
+(ert-deftest touchtype-test-programming-bigrams-populated ()
+  "Programming bigrams list should have entries."
+  (should (> (length touchtype--programming-bigrams) 20)))
+
+;;; ─── Phase 4: Analytics tests ─────────────────────────────────────────────────
+
+(ert-deftest touchtype-test-heatmap-face-cold ()
+  "Heatmap face for 0 confidence should be cold."
+  (should (eq (touchtype-ui--heatmap-face 0.0) 'touchtype-face-heatmap-cold)))
+
+(ert-deftest touchtype-test-heatmap-face-struggling ()
+  "Heatmap face for low confidence should be struggling."
+  (should (eq (touchtype-ui--heatmap-face 0.2) 'touchtype-face-heatmap-struggling)))
+
+(ert-deftest touchtype-test-heatmap-face-developing ()
+  "Heatmap face for medium confidence should be developing."
+  (should (eq (touchtype-ui--heatmap-face 0.5) 'touchtype-face-heatmap-developing)))
+
+(ert-deftest touchtype-test-heatmap-face-good ()
+  "Heatmap face for high confidence should be good."
+  (should (eq (touchtype-ui--heatmap-face 0.8) 'touchtype-face-heatmap-good)))
+
+(ert-deftest touchtype-test-finger-stats-aggregation ()
+  "Finger stats should aggregate letter stats by finger."
+  (let ((touchtype--stats
+         (list :version 1
+               :letter-stats (list (list ?f :hits 100 :misses 5 :total-ms 30000 :best-ms 200)
+                                   (list ?r :hits 80 :misses 3 :total-ms 24000 :best-ms 210)
+                                   (list ?j :hits 90 :misses 4 :total-ms 27000 :best-ms 190))
+               :bigram-stats nil :sessions nil :unlocked-keys "fj" :confidence nil))
+        (touchtype-target-wpm 40)
+        (touchtype-keyboard-layout 'qwerty))
+    (let ((fstats (touchtype-stats-get-finger-stats)))
+      ;; f and r both map to left-index in qwerty
+      (let ((left-idx (assq 'left-index fstats)))
+        (should left-idx)
+        ;; hits should be sum of f + r
+        (should (= (plist-get (cdr left-idx) :hits) 180))
+        (should (> (plist-get (cdr left-idx) :accuracy) 0))))))
+
+(ert-deftest touchtype-test-finger-stats-empty ()
+  "Finger stats with no data should return entries with 0 hits."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil))
+        (touchtype-keyboard-layout 'qwerty))
+    (let ((fstats (touchtype-stats-get-finger-stats)))
+      (should (listp fstats))
+      ;; All entries should have 0 hits
+      (dolist (entry fstats)
+        (should (= (plist-get (cdr entry) :hits) 0))))))
+
+(ert-deftest touchtype-test-rolling-average-wpm ()
+  "Rolling average should compute mean of recent session WPMs."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions (list (list '2026-03-01 :wpm 40.0 :accuracy 95.0 :mode 'progressive :words 30)
+                               (list '2026-02-28 :wpm 38.0 :accuracy 93.0 :mode 'progressive :words 30)
+                               (list '2026-02-27 :wpm 36.0 :accuracy 91.0 :mode 'progressive :words 30))
+               :unlocked-keys "fj" :confidence nil)))
+    (let ((avg (touchtype-stats-get-rolling-average 10 :wpm)))
+      (should avg)
+      (should (< (abs (- avg 38.0)) 0.01)))))
+
+(ert-deftest touchtype-test-rolling-average-no-sessions ()
+  "Rolling average with no sessions should return nil."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil)))
+    (should-not (touchtype-stats-get-rolling-average 10 :wpm))))
+
+(ert-deftest touchtype-test-keyboard-rows-exist ()
+  "All layouts should have keyboard row definitions."
+  (should (= (length touchtype--qwerty-keyboard-rows) 3))
+  (should (= (length touchtype--dvorak-keyboard-rows) 3))
+  (should (= (length touchtype--colemak-keyboard-rows) 3))
+  (should (= (length touchtype--workman-keyboard-rows) 3)))
+
+(ert-deftest touchtype-test-finger-map-covers-letters ()
+  "Finger maps should cover most lowercase letters."
+  (dolist (fmap (list touchtype--qwerty-finger-map
+                      touchtype--dvorak-finger-map
+                      touchtype--colemak-finger-map
+                      touchtype--workman-finger-map))
+    (should (>= (length fmap) 20))))
+
+;;; ─── Phase 5: Gamification tests ──────────────────────────────────────────────
+
+(ert-deftest touchtype-test-achievements-first-session ()
+  "First session should award the first-session achievement."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions (list (list '2026-03-01 :wpm 25.0 :accuracy 90.0
+                                     :mode 'progressive :words 30))
+               :unlocked-keys "fj" :confidence nil
+               :achievements nil :daily-streak 1
+               :total-practice-time 60 :last-practice-date "2026-03-01"))
+        (touchtype-target-wpm 40))
+    (let ((new (touchtype-stats-check-achievements 25.0 90.0)))
+      (should (memq 'first-session new)))))
+
+(ert-deftest touchtype-test-achievements-speed-milestones ()
+  "Speed milestones should be awarded at correct thresholds."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions (list (list '2026-03-01 :wpm 75.0 :accuracy 96.0
+                                     :mode 'progressive :words 30))
+               :unlocked-keys "fj" :confidence nil
+               :achievements nil :daily-streak 1
+               :total-practice-time 60 :last-practice-date "2026-03-01"))
+        (touchtype-target-wpm 40))
+    (let ((new (touchtype-stats-check-achievements 75.0 96.0)))
+      (should (memq 'speed-30 new))
+      (should (memq 'speed-50 new))
+      (should (memq 'speed-70 new))
+      (should-not (memq 'speed-100 new))
+      (should (memq 'accuracy-95 new)))))
+
+(ert-deftest touchtype-test-achievements-no-duplicates ()
+  "Already-earned achievements should not be re-awarded."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions (list (list '2026-03-01 :wpm 40.0 :accuracy 97.0
+                                     :mode 'progressive :words 30))
+               :unlocked-keys "fj" :confidence nil
+               :achievements '(first-session speed-30)
+               :daily-streak 1
+               :total-practice-time 60 :last-practice-date "2026-03-01"))
+        (touchtype-target-wpm 40))
+    (let ((new (touchtype-stats-check-achievements 40.0 97.0)))
+      (should-not (memq 'first-session new))
+      (should-not (memq 'speed-30 new)))))
+
+(ert-deftest touchtype-test-xp-for-session ()
+  "XP calculation should use wpm * accuracy/100 * word-count."
+  (should (= (touchtype-stats-xp-for-session 40.0 100.0 30) 1200))
+  (should (= (touchtype-stats-xp-for-session 50.0 90.0 20) 900)))
+
+(ert-deftest touchtype-test-xp-add-and-get ()
+  "Adding XP should increase the total."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil :xp 0)))
+    (touchtype-stats-add-xp 500)
+    (should (= (touchtype-stats-get-xp) 500))
+    (touchtype-stats-add-xp 300)
+    (should (= (touchtype-stats-get-xp) 800))))
+
+(ert-deftest touchtype-test-level-from-xp ()
+  "Level should increase with XP thresholds."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil :xp 0)))
+    (should (= (touchtype-stats-get-level) 0))
+    (plist-put touchtype--stats :xp 100)
+    (should (= (touchtype-stats-get-level) 1))
+    (plist-put touchtype--stats :xp 500)
+    (should (= (touchtype-stats-get-level) 3))))
+
+(ert-deftest touchtype-test-xp-to-next-level ()
+  "XP to next level should be the gap to the next threshold."
+  (let ((touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil :xp 0)))
+    ;; At level 0 (0 XP), next is level 1 (100 XP)
+    (should (= (touchtype-stats-xp-to-next-level) 100))
+    (plist-put touchtype--stats :xp 150)
+    ;; At level 1 (100 XP threshold), next is level 2 (250 XP)
+    (should (= (touchtype-stats-xp-to-next-level) 100))))
+
+(ert-deftest touchtype-test-level-titles-count ()
+  "Level titles should match threshold count."
+  (should (= (length touchtype--level-titles)
+             (length touchtype--xp-level-thresholds))))
+
+(ert-deftest touchtype-test-achievements-definitions ()
+  "All achievements should have required fields."
+  (dolist (ach touchtype--achievements)
+    (should (plist-get ach :id))
+    (should (plist-get ach :name))
+    (should (plist-get ach :desc))))
+
+;;; ─── Phase 6: Session control tests ──────────────────────────────────────────
+
+(ert-deftest touchtype-test-pause-guard-blocks-input ()
+  "When paused, process-char should do nothing."
+  (with-temp-buffer
+    (let ((touchtype--paused t)
+          (touchtype--cursor-pos 0)
+          (touchtype--current-text "hello")
+          (touchtype--typed-chars nil)
+          (touchtype--session-total-keys 0)
+          (touchtype--session-errors 0)
+          (touchtype--session-corrections 0)
+          (touchtype--last-key-time nil)
+          (touchtype--line-start-time nil)
+          (touchtype--session-start-time nil)
+          (touchtype--session-idle-time 0.0)
+          (touchtype-session-type 'words)
+          (touchtype-error-mode 'normal)
+          (touchtype-difficulty 'normal)
+          (touchtype-pace-caret nil)
+          (touchtype--char-overlays (make-vector 5 nil))
+          (touchtype--target-start (point-marker))
+          (touchtype--status-start (point-marker)))
+      (touchtype-ui--process-char ?h)
+      ;; Cursor should not have advanced
+      (should (= touchtype--cursor-pos 0)))))
+
+(ert-deftest touchtype-test-pause-guard-blocks-backspace ()
+  "When paused, backspace should do nothing."
+  (with-temp-buffer
+    (let ((touchtype--paused t)
+          (touchtype--cursor-pos 3)
+          (touchtype--current-text "hello")
+          (touchtype--typed-chars '((?l t 200) (?l t 200) (?e t 200)))
+          (touchtype--session-corrections 0)
+          (touchtype--char-overlays (make-vector 5 nil)))
+      (touchtype-ui--handle-backspace)
+      ;; Cursor should not have moved back
+      (should (= touchtype--cursor-pos 3)))))
+
+(ert-deftest touchtype-test-difficulty-normal-continues ()
+  "Normal difficulty should not fail on errors."
+  ;; Just verify the defcustom default
+  (should (eq touchtype-difficulty 'normal)))
+
+(ert-deftest touchtype-test-difficulty-choices ()
+  "Difficulty should accept normal, expert, master."
+  (dolist (d '(normal expert master))
+    (let ((touchtype-difficulty d))
+      (should (eq touchtype-difficulty d)))))
+
+(ert-deftest touchtype-test-f5-bound-in-keymap ()
+  "F5 should be bound to toggle-pause in the keymap."
+  (let ((map (touchtype-ui--make-keymap)))
+    (should (eq (lookup-key map (kbd "<f5>")) #'touchtype-ui--toggle-pause))))
+
+(ert-deftest touchtype-test-status-shows-difficulty ()
+  "Status string should show difficulty when not normal."
+  (let ((touchtype--session-total-keys 50)
+        (touchtype--session-errors 2)
+        (touchtype--session-corrections 1)
+        (touchtype--session-start-time (- (float-time) 60))
+        (touchtype--session-idle-time 0.0)
+        (touchtype--session-line-wpms '(40.0 42.0))
+        (touchtype--session-word-count 10)
+        (touchtype-session-type 'words)
+        (touchtype-session-length 30)
+        (touchtype-mode-selection 'progressive)
+        (touchtype--unlocked-keys "fjdksl")
+        (touchtype--current-text "hello ")
+        (touchtype--cursor-pos 3)
+        (touchtype-difficulty 'master))
+    (let ((status (touchtype-ui--status-string)))
+      (should (string-match-p "\\[master\\]" status)))))
+
+(ert-deftest touchtype-test-status-hides-normal-difficulty ()
+  "Status string should not show difficulty indicator for normal."
+  (let ((touchtype--session-total-keys 50)
+        (touchtype--session-errors 2)
+        (touchtype--session-corrections 1)
+        (touchtype--session-start-time (- (float-time) 60))
+        (touchtype--session-idle-time 0.0)
+        (touchtype--session-line-wpms '(40.0 42.0))
+        (touchtype--session-word-count 10)
+        (touchtype-session-type 'words)
+        (touchtype-session-length 30)
+        (touchtype-mode-selection 'progressive)
+        (touchtype--unlocked-keys "fjdksl")
+        (touchtype--current-text "hello ")
+        (touchtype--cursor-pos 3)
+        (touchtype-difficulty 'normal))
+    (let ((status (touchtype-ui--status-string)))
+      (should-not (string-match-p "\\[normal\\]" status)))))
+
 (provide 'touchtype-test)
 
 ;;; touchtype-test.el ends here

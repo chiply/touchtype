@@ -73,6 +73,7 @@ installs command remaps as a safety net for minor-mode bindings."
     (define-key map (kbd "TAB") #'touchtype-ui--quick-restart)
     (define-key map (kbd "RET") #'touchtype-ui--ignore-key)
     (define-key map (kbd "C-g") #'touchtype-ui--quit)
+    (define-key map (kbd "<f5>") #'touchtype-ui--toggle-pause)
     map))
 
 ;;;; Buffer setup
@@ -113,7 +114,14 @@ installs command remaps as a safety net for minor-mode bindings."
                        touchtype--pace-timer
                        touchtype--pace-pos
                        touchtype--pace-overlay
-                       touchtype--completed-lines))
+                       touchtype--completed-lines
+                       touchtype--quote-passage
+                       touchtype--quote-offset
+                       touchtype--domain-selection
+                       touchtype--code-language
+                       touchtype--paused
+                       touchtype--pause-start-time
+                       touchtype--pause-overlay))
           (make-local-variable sym))
         ;; Load persisted state
         (touchtype-stats-load)
@@ -133,7 +141,10 @@ installs command remaps as a safety net for minor-mode bindings."
               touchtype--pace-timer          nil
               touchtype--pace-pos            0
               touchtype--pace-overlay        nil
-              touchtype--completed-lines     nil)
+              touchtype--completed-lines     nil
+              touchtype--paused              nil
+              touchtype--pause-start-time    nil
+              touchtype--pause-overlay       nil)
         (setq touchtype-ui--keymap (touchtype-ui--make-keymap))
         (use-local-map touchtype-ui--keymap)
         (setq-local cursor-type nil)
@@ -396,8 +407,10 @@ _CHAR is accepted for API compatibility but unused."
          (acc-str   (if (> total 0) (format "%.0f%%" acc) "--"))
          (line1 (format "  Net: %s  Gross: %s  Acc: %s  Consistency: %s"
                          net-str gross-str acc-str cons-str))
-         (line2 (format "  Time: %s  Words: %s  Corrections: %d  Mode: %s%s"
-                         time-str words corr mode keys)))
+         (diff-str (if (eq touchtype-difficulty 'normal) ""
+                     (format " [%s]" touchtype-difficulty)))
+         (line2 (format "  Time: %s  Words: %s  Corrections: %d  Mode: %s%s%s"
+                         time-str words corr mode diff-str keys)))
     (propertize (concat line1 "\n" line2) 'face 'touchtype-face-status)))
 
 (defun touchtype-ui--enforce-point ()
@@ -413,6 +426,111 @@ status line or elsewhere after each command."
       (unless (= (point) target)
         (goto-char target)))))
 
+;;;; Pause/Resume
+
+(defun touchtype-ui--toggle-pause ()
+  "Toggle pause/resume for the current session."
+  (interactive)
+  (if touchtype--paused
+      ;; Resume
+      (let ((pause-duration (- (float-time) touchtype--pause-start-time)))
+        (setq touchtype--paused nil)
+        ;; Add pause duration to idle time so WPM isn't affected
+        (setq touchtype--session-idle-time
+              (+ (or touchtype--session-idle-time 0.0) pause-duration))
+        ;; Shift line-start-time forward if it exists
+        (when touchtype--line-start-time
+          (setq touchtype--line-start-time
+                (+ touchtype--line-start-time pause-duration)))
+        ;; Restart timed session timer with remaining time
+        (when (and (eq touchtype-session-type 'timed)
+                   touchtype--session-start-time)
+          (touchtype-ui--cancel-session-timer)
+          (let* ((raw-elapsed (- (float-time) touchtype--session-start-time))
+                 (remaining (max 0.0 (- touchtype-session-duration
+                                        (- raw-elapsed (or touchtype--session-idle-time 0.0))))))
+            (when (> remaining 0)
+              (setq touchtype--session-timer
+                    (run-at-time remaining nil
+                                 #'touchtype-ui--timed-session-expire
+                                 (current-buffer))))))
+        ;; Restart pace caret
+        (when touchtype-pace-caret
+          (touchtype-ui--start-pace-caret))
+        ;; Remove pause overlay
+        (when (overlayp touchtype--pause-overlay)
+          (delete-overlay touchtype--pause-overlay)
+          (setq touchtype--pause-overlay nil))
+        (touchtype-ui--update-status))
+    ;; Pause
+    (setq touchtype--paused t
+          touchtype--pause-start-time (float-time))
+    ;; Cancel timers
+    (touchtype-ui--cancel-session-timer)
+    (touchtype-ui--stop-pace-caret)
+    ;; Show PAUSED overlay
+    (when touchtype--target-start
+      (let* ((start (marker-position touchtype--target-start))
+             (end (+ start (length (or touchtype--current-text ""))))
+             (ov (make-overlay start end)))
+        (overlay-put ov 'display (propertize "  *** PAUSED (F5 to resume) ***"
+                                             'face 'bold))
+        (overlay-put ov 'priority 20)
+        (setq touchtype--pause-overlay ov)))))
+
+;;;; Difficulty tier: session failure
+
+(defun touchtype-ui--end-session-failed ()
+  "End the session due to difficulty tier failure.
+Shows SESSION FAILED header and records :failed t in session."
+  (touchtype-ui--cancel-session-timer)
+  (touchtype-ui--stop-pace-caret)
+  (let* ((total-keys touchtype--session-total-keys)
+         (total-errs touchtype--session-errors)
+         (corrections touchtype--session-corrections)
+         (raw-elapsed (if touchtype--session-start-time
+                         (- (float-time) touchtype--session-start-time)
+                       0.0))
+         (idle (or touchtype--session-idle-time 0.0))
+         (elapsed-s (max 0.0 (- raw-elapsed idle)))
+         (minutes (/ elapsed-s 60.0))
+         (gross-wpm (if (> minutes 0)
+                        (/ (/ (float total-keys) 5.0) minutes)
+                      0.0))
+         (uncorrected (max 0 (- total-errs corrections)))
+         (net-wpm (if (> minutes 0)
+                      (max 0.0 (/ (- (/ (float total-keys) 5.0) uncorrected) minutes))
+                    0.0))
+         (accuracy (if (> total-keys 0)
+                       (* 100.0 (/ (float (- total-keys total-errs)) total-keys))
+                     100.0)))
+    (touchtype-stats-record-session
+     net-wpm accuracy touchtype-mode-selection touchtype--session-word-count
+     :gross-wpm gross-wpm :total-time elapsed-s :total-chars total-keys
+     :corrections corrections :uncorrected-errors uncorrected :failed t)
+    (touchtype-stats-save)
+    (setq touchtype--current-text nil)
+    (remove-hook 'post-command-hook #'touchtype-ui--enforce-point t)
+    (setq-local cursor-type t)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert "\n")
+      (insert (propertize "  SESSION FAILED!\n\n" 'face '(:foreground "red" :weight bold)))
+      (insert (propertize (format "  Difficulty: %s\n\n" touchtype-difficulty) 'face 'bold))
+      (insert (format "    Net WPM:    %.1f\n" net-wpm))
+      (insert (format "    Accuracy:   %.1f%%\n" accuracy))
+      (insert (format "    Words:      %d\n" touchtype--session-word-count))
+      (insert (format "    Characters: %d\n\n" total-keys))
+      (insert (propertize
+               "  r: restart  q: quit\n"
+               'face 'touchtype-face-status))
+      (goto-char (point-min)))
+    (use-local-map
+     (let ((map (make-sparse-keymap)))
+       (define-key map (kbd "r") #'touchtype-ui--restart-session)
+       (define-key map (kbd "q") #'touchtype-ui--quit)
+       map))))
+
 ;;;; Input handling
 
 (defun touchtype-ui--handle-char ()
@@ -425,6 +543,9 @@ status line or elsewhere after each command."
 (defun touchtype-ui--process-char (char)
   "Process CHAR typed by the user against the current target text."
   (cl-block touchtype-ui--process-char
+  ;; Pause guard
+  (when touchtype--paused
+    (cl-return-from touchtype-ui--process-char))
   (let* ((pos     touchtype--cursor-pos)
          (text    touchtype--current-text)
          (n       (length text))
@@ -436,6 +557,29 @@ status line or elsewhere after each command."
          (expected (when (< pos n) (aref text pos)))
          (correct-p (and expected (= char expected))))
     (when (< pos n)
+      ;; Difficulty tier: master mode - fail on any wrong key
+      (when (and (eq touchtype-difficulty 'master) (not correct-p))
+        (cl-incf touchtype--session-total-keys)
+        (cl-incf touchtype--session-errors)
+        (touchtype-stats-record-keypress expected nil elapsed)
+        (touchtype-ui--end-session-failed)
+        (cl-return-from touchtype-ui--process-char))
+      ;; Difficulty tier: expert mode - fail at word boundary if word has errors
+      (when (and (eq touchtype-difficulty 'expert)
+                 expected (= expected ?\s))
+        (let ((has-error nil)
+              (check-pos (1- pos)))
+          (while (and (>= check-pos 0)
+                      (not (= (aref text check-pos) ?\s)))
+            (let ((rec (nth (- pos check-pos 1) touchtype--typed-chars)))
+              (when (and rec (not (cadr rec)))
+                (setq has-error t)))
+            (cl-decf check-pos))
+          (when has-error
+            (cl-incf touchtype--session-total-keys)
+            (cl-incf touchtype--session-errors)
+            (touchtype-ui--end-session-failed)
+            (cl-return-from touchtype-ui--process-char))))
       ;; Stop-on-error: letter mode blocks on wrong key
       (when (and (eq touchtype-error-mode 'letter) (not correct-p))
         (cl-incf touchtype--session-total-keys)
@@ -518,7 +662,8 @@ status line or elsewhere after each command."
 (defun touchtype-ui--handle-backspace ()
   "Remove the last typed character and rewind the cursor."
   (interactive)
-  (when (> touchtype--cursor-pos 0)
+  (when (and (not touchtype--paused)
+             (> touchtype--cursor-pos 0))
     (cl-incf touchtype--session-corrections)
     (cl-decf touchtype--cursor-pos)
     (touchtype-ui--update-typed-space touchtype--cursor-pos)
@@ -808,6 +953,14 @@ each section's :is-expanded flag."
      :uncorrected-errors uncorrected
      :consistency consistency)
     (touchtype-stats-update-streak-and-time elapsed-s)
+    ;; XP and achievements
+    (let* ((session-xp (touchtype-stats-xp-for-session
+                        net-wpm accuracy touchtype--session-word-count))
+           (old-level (touchtype-stats-get-level)))
+      (touchtype-stats-add-xp session-xp)
+      (let ((new-achievements (touchtype-stats-check-achievements net-wpm accuracy))
+            (new-level (touchtype-stats-get-level))
+            (level-up-p (> (touchtype-stats-get-level) old-level)))
     (touchtype-stats-save)
     ;; Disable typing-area cursor lock so the end-session buffer is navigable
     (setq touchtype--current-text nil)
@@ -819,6 +972,22 @@ each section's :is-expanded flag."
       (insert (propertize "  Session Complete!\n\n" 'face 'bold))
       (when is-pb
         (insert (propertize "  *** New Personal Best! ***\n\n" 'face 'bold)))
+      (when level-up-p
+        (insert (propertize (format "  *** Level Up! Level %d: %s ***\n\n"
+                                    new-level
+                                    (aref touchtype--level-titles
+                                          (min new-level (1- (length touchtype--level-titles)))))
+                            'face 'bold)))
+      (when new-achievements
+        (dolist (id new-achievements)
+          (let ((ach (cl-find id touchtype--achievements
+                              :key (lambda (a) (plist-get a :id)))))
+            (when ach
+              (insert (propertize
+                       (format "  *** Achievement Unlocked: %s ***\n"
+                               (plist-get ach :name))
+                       'face 'bold)))))
+        (insert "\n"))
       (insert (propertize "  Speed\n" 'face 'bold 'touchtype-category t))
       (insert (format "    Net WPM:    %.1f\n" net-wpm))
       (insert (format "    Gross WPM:  %.1f\n" gross-wpm))
@@ -847,6 +1016,33 @@ each section's :is-expanded flag."
             (total-secs (touchtype-stats-get-total-practice-time)))
         (insert (format "    Streak:        %d day%s\n" streak (if (= streak 1) "" "s")))
         (insert (format "    Total Time:    %s\n" (touchtype-ui--format-duration total-secs))))
+      ;; XP and level display
+      (let* ((xp-to-next (touchtype-stats-xp-to-next-level))
+             (level-title (aref touchtype--level-titles
+                                (min new-level (1- (length touchtype--level-titles))))))
+        (insert (format "    XP:            +%s  Level %d: %s"
+                        (number-to-string session-xp)
+                        new-level level-title))
+        (when (> xp-to-next 0)
+          (insert (format "  (%d XP to next)" xp-to-next)))
+        (insert "\n"))
+      ;; Session delta (vs rolling average)
+      (let ((avg-wpm (touchtype-stats-get-rolling-average
+                      touchtype-rolling-average-window :wpm))
+            (avg-acc (touchtype-stats-get-rolling-average
+                      touchtype-rolling-average-window :accuracy)))
+        (when avg-wpm
+          (let* ((wpm-delta (- net-wpm avg-wpm))
+                 (acc-delta (- accuracy avg-acc))
+                 (wpm-sign (if (>= wpm-delta 0) "+" ""))
+                 (acc-sign (if (>= acc-delta 0) "+" ""))
+                 (wpm-face (if (>= wpm-delta 0) 'touchtype-face-correct 'touchtype-face-wrong))
+                 (acc-face (if (>= acc-delta 0) 'touchtype-face-correct 'touchtype-face-wrong)))
+            (insert (format "    vs %d-session avg: " touchtype-rolling-average-window))
+            (insert (propertize (format "%s%.1f WPM" wpm-sign wpm-delta) 'face wpm-face))
+            (insert "  ")
+            (insert (propertize (format "%s%.1f%% acc" acc-sign acc-delta) 'face acc-face))
+            (insert "\n"))))
       (insert "\n")
       ;; Set up expandable sections (area markers bracket the region)
       (let* ((mode-label (symbol-name mode))
@@ -896,7 +1092,7 @@ each section's :is-expanded flag."
        (define-key map (kbd "<backtab>") #'touchtype-ui--end-session-prev-category)
        (define-key map (kbd "r") #'touchtype-ui--restart-session)
        (define-key map (kbd "q")   #'touchtype-ui--quit)
-       map))))
+       map))))))
 
 (defun touchtype-ui--restart-session ()
   "Reset counters and start a new session."
@@ -913,7 +1109,12 @@ each section's :is-expanded flag."
         touchtype--typed-chars         nil
         touchtype--session-idle-time   0.0
         touchtype--preview-texts       nil
-        touchtype--completed-lines     nil)
+        touchtype--completed-lines     nil
+        touchtype--paused              nil
+        touchtype--pause-start-time    nil)
+  (when (overlayp touchtype--pause-overlay)
+    (delete-overlay touchtype--pause-overlay)
+    (setq touchtype--pause-overlay nil))
   ;; Re-enable typing-area cursor lock and hide cursor
   (setq-local cursor-type nil)
   (add-hook 'post-command-hook #'touchtype-ui--enforce-point nil t)
@@ -1021,6 +1222,66 @@ Maps values to bar characters scaled min-to-max."
           (when (>= touchtype--pace-pos n)
             (touchtype-ui--stop-pace-caret)))))))
 
+;;;; Heatmap and finger stats helpers
+
+(defun touchtype-ui--heatmap-face (confidence)
+  "Return the face for CONFIDENCE value in the keyboard heatmap."
+  (cond
+   ((<= confidence 0.0)  'touchtype-face-heatmap-cold)
+   ((< confidence 0.3)   'touchtype-face-heatmap-struggling)
+   ((< confidence 0.6)   'touchtype-face-heatmap-developing)
+   (t                    'touchtype-face-heatmap-good)))
+
+(defun touchtype-ui--render-keyboard-heatmap ()
+  "Insert a keyboard heatmap showing per-key confidence with color coding."
+  (let* ((rows (pcase touchtype-keyboard-layout
+                 ('qwerty  touchtype--qwerty-keyboard-rows)
+                 ('dvorak  touchtype--dvorak-keyboard-rows)
+                 ('colemak touchtype--colemak-keyboard-rows)
+                 ('workman touchtype--workman-keyboard-rows)
+                 (_        touchtype--qwerty-keyboard-rows)))
+         (indents '("    " "     " "      ")))
+    (insert (propertize "  Keyboard Heatmap\n" 'face 'bold))
+    (cl-loop for row in rows
+             for indent in indents
+             do (insert indent)
+             do (dotimes (i (length row))
+                  (let* ((ch (aref row i))
+                         (conf (touchtype-stats-get-confidence ch))
+                         (face (touchtype-ui--heatmap-face conf)))
+                    (insert (propertize (format "[%c]" ch) 'face face))))
+             do (insert "\n"))
+    (insert "    Legend: "
+            (propertize "[x]" 'face 'touchtype-face-heatmap-cold) " no data  "
+            (propertize "[x]" 'face 'touchtype-face-heatmap-struggling) " <0.3  "
+            (propertize "[x]" 'face 'touchtype-face-heatmap-developing) " 0.3-0.6  "
+            (propertize "[x]" 'face 'touchtype-face-heatmap-good) " >=0.6\n\n")))
+
+(defun touchtype-ui--render-finger-stats ()
+  "Insert per-finger performance section."
+  (insert (propertize "  Per-Finger Performance\n" 'face 'bold))
+  (let ((finger-stats (touchtype-stats-get-finger-stats))
+        (finger-order '(left-pinky left-ring left-middle left-index
+                        right-index right-middle right-ring right-pinky)))
+    (if (cl-every (lambda (f)
+                    (let ((entry (assq f finger-stats)))
+                      (or (null entry) (= (plist-get (cdr entry) :hits) 0))))
+                  finger-order)
+        (insert "    (not enough data yet)\n")
+      (dolist (finger finger-order)
+        (let* ((entry (assq finger finger-stats))
+               (name (cdr (assq finger touchtype--finger-names)))
+               (hits (if entry (plist-get (cdr entry) :hits) 0))
+               (accuracy (if entry (plist-get (cdr entry) :accuracy) 0.0))
+               (avg-ms (if entry (plist-get (cdr entry) :avg-ms) 0.0)))
+          (when (> hits 0)
+            (let* ((bar-len (min 15 (round (* 15 (/ accuracy 100.0)))))
+                   (bar (make-string bar-len ?|))
+                   (pad (make-string (- 15 bar-len) ?.)))
+              (insert (format "    %-9s [%s%s] Acc: %5.1f%%  Avg: %3.0fms  (%d hits)\n"
+                              name bar pad accuracy avg-ms hits))))))))
+  (insert "\n"))
+
 ;;;; Stats view
 
 (defun touchtype-ui-show-stats ()
@@ -1055,6 +1316,8 @@ Maps values to bar characters scaled min-to-max."
                             streak (if (= streak 1) "" "s")
                             (touchtype-ui--format-duration total-secs))))
           (insert "\n")
+          ;; 1b. Keyboard heatmap
+          (touchtype-ui--render-keyboard-heatmap)
           ;; 2. Per-letter confidence
           (insert (propertize "  Per-Letter Confidence\n" 'face 'bold))
           (dolist (ch (touchtype-stats-get-weak-letters))
@@ -1093,8 +1356,11 @@ Maps values to bar characters scaled min-to-max."
                           (when (> hits 0)
                             (insert (format "      %c  [%s%s] %.2f  (%d hits)\n"
                                             ch bar pad conf hits)))))))))))
+          ;; 2c. Per-finger performance
+          (insert "\n")
+          (touchtype-ui--render-finger-stats)
           ;; 3. Weakest bigrams
-          (insert (propertize "\n  Weakest Bigrams\n" 'face 'bold))
+          (insert (propertize "  Weakest Bigrams\n" 'face 'bold))
           (let ((weak-bigrams (touchtype-stats-get-weak-bigrams 10)))
             (if (null weak-bigrams)
                 (insert "    (not enough data yet)\n")
@@ -1173,6 +1439,39 @@ Maps values to bar characters scaled min-to-max."
                       (best-acc (plist-get (cdr entry) :accuracy)))
                   (insert (format "    %-20s  WPM: %.1f  Accuracy: %.1f%%\n"
                                   mode (or best-wpm 0.0) (or best-acc 0.0))))))))
+          ;; 8. XP / Level
+          (let* ((xp (touchtype-stats-get-xp))
+                 (level (touchtype-stats-get-level))
+                 (title (aref touchtype--level-titles
+                              (min level (1- (length touchtype--level-titles)))))
+                 (to-next (touchtype-stats-xp-to-next-level))
+                 (max-level (1- (length touchtype--xp-level-thresholds)))
+                 (threshold (aref touchtype--xp-level-thresholds level))
+                 (next-threshold (if (< level max-level)
+                                     (aref touchtype--xp-level-thresholds (1+ level))
+                                   threshold))
+                 (range (max 1 (- next-threshold threshold)))
+                 (progress (min range (- xp threshold)))
+                 (bar-len (round (* 20 (/ (float progress) range))))
+                 (bar (make-string bar-len ?|))
+                 (pad (make-string (- 20 bar-len) ?.)))
+            (insert (propertize "\n  Level / XP\n" 'face 'bold))
+            (insert (format "    Level %d: %s  (%d XP)\n" level title xp))
+            (if (> to-next 0)
+                (insert (format "    [%s%s] %d XP to next level\n" bar pad to-next))
+              (insert "    [||||||||||||||||||||] Max level!\n")))
+          ;; 9. Achievements
+          (insert (propertize "\n  Achievements\n" 'face 'bold))
+          (let ((earned (touchtype-stats-get-achievements)))
+            (dolist (ach touchtype--achievements)
+              (let* ((id (plist-get ach :id))
+                     (name (plist-get ach :name))
+                     (desc (plist-get ach :desc))
+                     (got (memq id earned)))
+                (if got
+                    (insert (format "    [x] %s — %s\n" name desc))
+                  (insert (propertize (format "    [ ] %s — %s\n" name desc)
+                                      'face 'shadow))))))
         (insert "\n")
         (goto-char (point-min))
         (setq buffer-read-only t)

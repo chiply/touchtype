@@ -469,6 +469,157 @@ Consecutive day: streak + 1.  Gap: streak resets to 1."
   (unless touchtype--stats (touchtype-stats-load))
   (or (plist-get touchtype--stats :total-practice-time) 0))
 
+;;;; Per-finger statistics
+
+(defun touchtype-stats--finger-map ()
+  "Return the finger map for the current keyboard layout."
+  (pcase touchtype-keyboard-layout
+    ('qwerty  touchtype--qwerty-finger-map)
+    ('dvorak  touchtype--dvorak-finger-map)
+    ('colemak touchtype--colemak-finger-map)
+    ('workman touchtype--workman-finger-map)
+    (_        touchtype--qwerty-finger-map)))
+
+(defun touchtype-stats-get-finger-stats ()
+  "Return alist of per-finger performance stats.
+Each entry is (FINGER . plist) where plist has keys :hits,
+:misses, :total-ms, :accuracy, and :avg-ms.  Aggregates
+letter-stats by finger using the current layout's finger map."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let ((fmap (touchtype-stats--finger-map))
+        (result nil))
+    (dolist (mapping fmap)
+      (let* ((ch (car mapping))
+             (finger (cdr mapping))
+             (entry (assq ch (plist-get touchtype--stats :letter-stats)))
+             (hits (if entry (touchtype-stats--entry-get entry :hits) 0))
+             (misses (if entry (touchtype-stats--entry-get entry :misses) 0))
+             (total-ms (if entry (touchtype-stats--entry-get entry :total-ms) 0))
+             (existing (assq finger result)))
+        (if existing
+            (progn
+              (plist-put (cdr existing) :hits
+                         (+ (plist-get (cdr existing) :hits) hits))
+              (plist-put (cdr existing) :misses
+                         (+ (plist-get (cdr existing) :misses) misses))
+              (plist-put (cdr existing) :total-ms
+                         (+ (plist-get (cdr existing) :total-ms) total-ms)))
+          (push (cons finger (list :hits hits :misses misses :total-ms total-ms))
+                result))))
+    ;; Compute derived metrics
+    (dolist (entry result)
+      (let* ((hits (plist-get (cdr entry) :hits))
+             (misses (plist-get (cdr entry) :misses))
+             (total-ms (plist-get (cdr entry) :total-ms))
+             (accuracy (if (> (+ hits misses) 0)
+                           (* 100.0 (/ (float hits) (+ hits misses)))
+                         0.0))
+             (avg-ms (if (> hits 0) (/ (float total-ms) hits) 0.0)))
+        (plist-put (cdr entry) :accuracy accuracy)
+        (plist-put (cdr entry) :avg-ms avg-ms)))
+    (nreverse result)))
+
+;;;; Achievement system
+
+(defun touchtype-stats-get-achievements ()
+  "Return the list of earned achievement ID symbols."
+  (unless touchtype--stats (touchtype-stats-load))
+  (or (plist-get touchtype--stats :achievements) nil))
+
+(defun touchtype-stats--award-achievement (id)
+  "Award achievement ID if not already earned."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let ((earned (plist-get touchtype--stats :achievements)))
+    (unless (memq id earned)
+      (plist-put touchtype--stats :achievements (cons id earned)))))
+
+(defun touchtype-stats-check-achievements (wpm accuracy)
+  "Check all achievement conditions given session WPM and ACCURACY.
+Returns list of newly earned achievement IDs."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let ((earned (touchtype-stats-get-achievements))
+        (sessions (plist-get touchtype--stats :sessions))
+        (streak (touchtype-stats-get-streak))
+        (total-secs (touchtype-stats-get-total-practice-time))
+        (unlocked (or (plist-get touchtype--stats :unlocked-keys) "fj"))
+        (newly nil))
+    (cl-flet ((award (id)
+                (unless (memq id earned)
+                  (touchtype-stats--award-achievement id)
+                  (push id newly))))
+      ;; Session milestones
+      (award 'first-session)
+      (when (>= wpm 30)  (award 'speed-30))
+      (when (>= wpm 50)  (award 'speed-50))
+      (when (>= wpm 70)  (award 'speed-70))
+      (when (>= wpm 100) (award 'speed-100))
+      (when (>= accuracy 95)  (award 'accuracy-95))
+      (when (>= accuracy 99)  (award 'accuracy-99))
+      (when (>= accuracy 100) (award 'accuracy-100))
+      ;; Streak
+      (when (>= streak 7)  (award 'streak-7))
+      (when (>= streak 30) (award 'streak-30))
+      ;; Session count (including current)
+      (let ((n (length sessions)))
+        (when (>= n 10)  (award 'sessions-10))
+        (when (>= n 50)  (award 'sessions-50))
+        (when (>= n 100) (award 'sessions-100)))
+      ;; All keys unlocked
+      (when (>= (length unlocked) 26) (award 'all-keys))
+      ;; Practice time
+      (when (>= total-secs 3600)   (award 'practice-1h))
+      (when (>= total-secs 36000)  (award 'practice-10h)))
+    newly))
+
+;;;; XP and level system
+
+(defun touchtype-stats-get-xp ()
+  "Return the current total XP."
+  (unless touchtype--stats (touchtype-stats-load))
+  (or (plist-get touchtype--stats :xp) 0))
+
+(defun touchtype-stats-add-xp (amount)
+  "Add AMOUNT of XP to the total."
+  (unless touchtype--stats (touchtype-stats-load))
+  (plist-put touchtype--stats :xp
+             (+ (touchtype-stats-get-xp) amount)))
+
+(defun touchtype-stats-get-level ()
+  "Return the current level (0-25) based on total XP."
+  (let ((xp (touchtype-stats-get-xp))
+        (level 0))
+    (cl-loop for i from (1- (length touchtype--xp-level-thresholds)) downto 0
+             when (>= xp (aref touchtype--xp-level-thresholds i))
+             do (setq level i)
+             and return nil)
+    level))
+
+(defun touchtype-stats-xp-for-session (wpm accuracy word-count)
+  "Compute XP earned for a session with WPM, ACCURACY, and WORD-COUNT.
+Formula: round(WPM * ACCURACY/100 * WORD-COUNT)."
+  (round (* wpm (/ accuracy 100.0) word-count)))
+
+(defun touchtype-stats-xp-to-next-level ()
+  "Return XP needed to reach the next level, or 0 if at max."
+  (let* ((level (touchtype-stats-get-level))
+         (xp (touchtype-stats-get-xp))
+         (max-level (1- (length touchtype--xp-level-thresholds))))
+    (if (>= level max-level)
+        0
+      (- (aref touchtype--xp-level-thresholds (1+ level)) xp))))
+
+;;;; Rolling average
+
+(defun touchtype-stats-get-rolling-average (n metric)
+  "Return the average of METRIC over the last N sessions.
+METRIC is a keyword like :wpm or :accuracy.  Returns nil if no sessions."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((sessions (seq-take (plist-get touchtype--stats :sessions) n))
+         (values (cl-remove nil (mapcar (lambda (s) (plist-get (cdr s) metric))
+                                        sessions))))
+    (when values
+      (/ (cl-reduce #'+ values) (float (length values))))))
+
 ;;;; Stats export
 
 (defun touchtype-stats-export-json ()

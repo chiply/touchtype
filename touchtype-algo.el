@@ -283,6 +283,18 @@ Returns nil when the passage is exhausted."
        "abcdefghijklmnopqrstuvwxyz"))
     ('code
      (apply #'string (number-sequence 32 126)))
+    ('weak-letters "abcdefghijklmnopqrstuvwxyz")
+    ('weak-bigrams "abcdefghijklmnopqrstuvwxyz")
+    ('weak-mixed   "abcdefghijklmnopqrstuvwxyz")
+    ('quote
+     (concat "abcdefghijklmnopqrstuvwxyz"
+             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+             touchtype--numbers touchtype--symbols " "))
+    ('domain-words "abcdefghijklmnopqrstuvwxyz")
+    ('left-hand  (touchtype-algo--hand-keys 'left))
+    ('right-hand (touchtype-algo--hand-keys 'right))
+    ('symbol-drill
+     (apply #'string (number-sequence 32 126)))
     (_ touchtype--unlocked-keys)))
 
 (defun touchtype-algo-generate-line ()
@@ -319,14 +331,63 @@ The line targets ~75 characters and is space-separated words."
           (cl-incf total-len (1+ (length w)))))
       (mapconcat #'identity (nreverse words) " ")))
    ((eq touchtype-mode-selection 'code)
-    (let* ((n (length touchtype--code-snippets))
+    (let* ((source (if (and touchtype--code-language
+                            (assq touchtype--code-language
+                                  touchtype--code-snippets-by-language))
+                       (cdr (assq touchtype--code-language
+                                  touchtype--code-snippets-by-language))
+                     touchtype--code-snippets))
+           (n (length source))
            (snippets '())
            (total-len 0))
       (while (< total-len 60)
-        (let ((s (aref touchtype--code-snippets (random n))))
+        (let ((s (aref source (random n))))
           (push s snippets)
           (cl-incf total-len (+ 2 (length s)))))
       (mapconcat #'identity (nreverse snippets) "  ")))
+   ((eq touchtype-mode-selection 'weak-letters)
+    (touchtype-algo--weak-letters-line))
+   ((eq touchtype-mode-selection 'weak-bigrams)
+    (touchtype-algo--weak-bigrams-line))
+   ((eq touchtype-mode-selection 'weak-mixed)
+    (touchtype-algo--weak-mixed-line))
+   ((eq touchtype-mode-selection 'quote)
+    (or (touchtype-algo--generate-line-from-passage
+         'touchtype--quote-passage 'touchtype--quote-offset)
+        (progn
+          (touchtype-algo--prepare-quote)
+          (touchtype-algo--generate-line-from-passage
+           'touchtype--quote-passage 'touchtype--quote-offset))))
+   ((eq touchtype-mode-selection 'domain-words)
+    (let* ((domain (or touchtype--domain-selection 'programming))
+           (words-vec (cdr (assq domain touchtype--domain-words))))
+      (if (and words-vec (> (length words-vec) 0))
+          (let ((words '()) (total-len 0)
+                (n (length words-vec)))
+            (while (< total-len 70)
+              (push (aref words-vec (random n)) words)
+              (cl-incf total-len (1+ (length (car words)))))
+            (mapconcat #'identity (nreverse words) " "))
+        ;; Fallback
+        (touchtype-algo-generate-word "abcdefghijklmnopqrstuvwxyz"))))
+   ((memq touchtype-mode-selection '(left-hand right-hand))
+    (let* ((allowed (touchtype-algo--allowed-for-mode))
+           (valid-words (cl-loop for i below (length touchtype--builtin-words)
+                                 for w = (aref touchtype--builtin-words i)
+                                 when (cl-every (lambda (c)
+                                                  (seq-contains-p allowed c #'=))
+                                                w)
+                                 collect w))
+           (use-real (>= (length valid-words) 15))
+           (words '()) (total-len 0))
+      (while (< total-len 70)
+        (let ((w (if use-real
+                     (nth (random (length valid-words)) valid-words)
+                   (touchtype-algo-generate-word allowed))))
+          (when w (push w words) (cl-incf total-len (1+ (length w))))))
+      (mapconcat #'identity (nreverse words) " ")))
+   ((eq touchtype-mode-selection 'symbol-drill)
+    (touchtype-algo--symbol-drill-line))
    (t
     (let* ((allowed (touchtype-algo--allowed-for-mode))
            (words '())
@@ -351,6 +412,205 @@ The line targets ~75 characters and is space-separated words."
             (push w words)
             (cl-incf total-len (1+ (length w))))))
       (mapconcat #'identity (nreverse words) " ")))))
+
+;;;; Inverse-confidence weighting for weak modes
+
+(defun touchtype-algo--inverse-confidence-weights (chars)
+  "Return alist of (CHAR . WEIGHT) where WEIGHT = max(0.01, 1.0 - confidence).
+CHARS is a string of characters to weight."
+  (mapcar (lambda (ch)
+            (cons ch (max 0.01 (- 1.0 (touchtype-stats-get-confidence ch)))))
+          (string-to-list chars)))
+
+(defun touchtype-algo--pick-weighted-float (alist)
+  "Pick a random element from ALIST of (KEY . FLOAT-WEIGHT) pairs.
+Returns the KEY, or nil if ALIST is empty."
+  (when alist
+    (let* ((total (cl-reduce #'+ alist :key #'cdr :initial-value 0.0))
+           (r (* (/ (random 10000) 10000.0) total))
+           (acc 0.0)
+           result)
+      (cl-loop for (key . w) in alist
+               do (setq acc (+ acc w))
+               when (and (null result) (>= acc r))
+               do (setq result key))
+      (or result (car (car alist))))))
+
+(defun touchtype-algo--build-suffix (len start-char allowed)
+  "Build a suffix string of LEN characters starting from START-CHAR.
+Walk the bigram table forward, filtered to ALLOWED chars string."
+  (let ((result nil)
+        (current start-char))
+    (dotimes (_ len)
+      (let* ((row (cdr (assq current touchtype--bigram-table)))
+             (next (touchtype-algo--weighted-pick row allowed)))
+        (if next
+            (progn (push next result) (setq current next))
+          (let ((ch (aref allowed (random (length allowed)))))
+            (push ch result)
+            (setq current ch)))))
+    (apply #'string (nreverse result))))
+
+(defun touchtype-algo--build-prefix (len target-char allowed)
+  "Build a prefix string of LEN characters ending at TARGET-CHAR.
+Walk the bigram table backward, filtered to ALLOWED chars."
+  (let ((result nil)
+        (current target-char))
+    (dotimes (_ len)
+      (let* ((candidates
+              (cl-loop for (ch . row) in touchtype--bigram-table
+                       when (and (seq-contains-p allowed ch #'=)
+                                 (assq current row))
+                       collect (cons ch (cdr (assq current row)))))
+             (prev (if candidates
+                       (touchtype-algo--pick-weighted-float
+                        (mapcar (lambda (p) (cons (car p) (float (cdr p)))) candidates))
+                     (aref allowed (random (length allowed))))))
+        (push prev result)
+        (setq current prev)))
+    (apply #'string result)))
+
+(defun touchtype-algo-generate-word-containing-ngram (ngram allowed-chars)
+  "Generate a pseudo-word containing NGRAM embedded at a random position.
+ALLOWED-CHARS is a string of characters.  The word length is 5-8.
+Prefix is built by walking bigram table backward from NGRAM start,
+suffix is built by walking forward from NGRAM end."
+  (let* ((ng-len (length ngram))
+         (word-len (+ 5 (random 4)))
+         (fill-len (max 0 (- word-len ng-len)))
+         (prefix-len (if (> fill-len 0) (random (1+ fill-len)) 0))
+         (suffix-len (- fill-len prefix-len))
+         (prefix (if (> prefix-len 0)
+                     (touchtype-algo--build-prefix prefix-len (aref ngram 0) allowed-chars)
+                   ""))
+         (suffix (if (> suffix-len 0)
+                     (touchtype-algo--build-suffix suffix-len (aref ngram (1- ng-len)) allowed-chars)
+                   "")))
+    (concat prefix ngram suffix)))
+
+;;;; Weak mode line generators
+
+(defun touchtype-algo--weak-letters-line ()
+  "Generate a line focusing on the user's weakest letters.
+Pick focus chars from the bottom N letters weighted by inverse confidence."
+  (let* ((all-letters "abcdefghijklmnopqrstuvwxyz")
+         (weights (touchtype-algo--inverse-confidence-weights all-letters))
+         ;; Sort by weight descending (weakest first)
+         (sorted (sort (copy-sequence weights)
+                       (lambda (a b) (> (cdr a) (cdr b)))))
+         (top-n (seq-take sorted touchtype-weak-letter-count))
+         (has-stats (cl-some (lambda (p) (> (cdr p) 0.01)) top-n)))
+    (if (not has-stats)
+        ;; Cold start: fall back to standard pseudo-words
+        (let ((words '()) (total-len 0))
+          (while (< total-len 70)
+            (let ((w (touchtype-algo-generate-word all-letters)))
+              (when w (push w words) (cl-incf total-len (1+ (length w))))))
+          (mapconcat #'identity (nreverse words) " "))
+      ;; Generate words with weak-letter focus
+      (let ((words '()) (total-len 0))
+        (while (< total-len 70)
+          (let* ((focus (touchtype-algo--pick-weighted-float top-n))
+                 (w (touchtype-algo-generate-word all-letters focus)))
+            (when w (push w words) (cl-incf total-len (1+ (length w))))))
+        (mapconcat #'identity (nreverse words) " ")))))
+
+(defun touchtype-algo--weak-bigrams-line ()
+  "Generate a line drilling the user's weakest n-grams.
+50% embed in pseudo-words, 50% drill raw."
+  (let* ((all-letters "abcdefghijklmnopqrstuvwxyz")
+         (weak-bi (touchtype-stats-get-weak-bigrams 10))
+         (weak-tri (touchtype-stats-get-weak-ngrams 3 3 10))
+         (weak-tet (touchtype-stats-get-weak-ngrams 4 4 10))
+         (all-weak (append (mapcar #'car weak-bi)
+                           (mapcar #'car weak-tri)
+                           (mapcar #'car weak-tet))))
+    (if (null all-weak)
+        ;; Cold start: fall back to common bigram drill
+        (touchtype-algo-ngram-line touchtype--common-bigrams)
+      (let ((words '()) (total-len 0))
+        (while (< total-len 70)
+          (let* ((ngram (nth (random (length all-weak)) all-weak))
+                 (embed-p (< (random 100) 50))
+                 (w (if embed-p
+                        (touchtype-algo-generate-word-containing-ngram ngram all-letters)
+                      ngram)))
+            (push w words)
+            (cl-incf total-len (1+ (length w)))))
+        (mapconcat #'identity (nreverse words) " ")))))
+
+(defun touchtype-algo--weak-mixed-line ()
+  "Generate a line mixing weak-letters and weak-bigrams approaches.
+40% weak-letters, 40% weak-bigrams, 20% blended."
+  (let ((roll (random 100)))
+    (cond
+     ((< roll 40) (touchtype-algo--weak-letters-line))
+     ((< roll 80) (touchtype-algo--weak-bigrams-line))
+     (t
+      ;; Blended: half words from each
+      (let ((part1 (split-string (touchtype-algo--weak-letters-line)))
+            (part2 (split-string (touchtype-algo--weak-bigrams-line)))
+            (words '())
+            (total-len 0))
+        (while (< total-len 70)
+          (let ((src (if (< (random 100) 50) part1 part2)))
+            (when src
+              (let ((w (nth (random (length src)) src)))
+                (push w words)
+                (cl-incf total-len (1+ (length w)))))))
+        (mapconcat #'identity (nreverse words) " "))))))
+
+;;;; Hand and layout helpers
+
+(defun touchtype-algo--hand-keys (hand)
+  "Return the key string for HAND (symbol `left' or `right').
+Dispatches on `touchtype-keyboard-layout'."
+  (pcase (list touchtype-keyboard-layout hand)
+    ('(qwerty left)   touchtype--qwerty-left-hand)
+    ('(qwerty right)  touchtype--qwerty-right-hand)
+    ('(dvorak left)   touchtype--dvorak-left-hand)
+    ('(dvorak right)  touchtype--dvorak-right-hand)
+    ('(colemak left)  touchtype--colemak-left-hand)
+    ('(colemak right) touchtype--colemak-right-hand)
+    ('(workman left)  touchtype--workman-left-hand)
+    ('(workman right) touchtype--workman-right-hand)
+    (_ (if (eq hand 'left) touchtype--qwerty-left-hand touchtype--qwerty-right-hand))))
+
+;;;; Quote mode helpers
+
+(defun touchtype-algo--prepare-quote ()
+  "Pick a random quote and set passage vars."
+  (let ((quote (aref touchtype--quotes (random (length touchtype--quotes)))))
+    (setq touchtype--quote-passage quote
+          touchtype--quote-offset 0)))
+
+;;;; Symbol drill
+
+(defconst touchtype--programming-symbols "!@#$%^&*()_+-=[]{}|;':\",./<>?`~"
+  "Symbol characters for programming drills.")
+
+(defconst touchtype--programming-bigrams
+  '("->" "=>" "!=" "==" "<=" ">=" "&&" "||" "++" "--" "::" "{}" "[]"
+    "()" "<>" ":=" "+=" "-=" "*=" "/=" "/*" "*/" "//" "<<" ">>" "?:"
+    "?." "??" "~>" "<-" "|>" "<|" "#{" "${")
+  "Common programming symbol bigrams for symbol-drill mode.")
+
+(defun touchtype-algo--symbol-drill-line ()
+  "Generate a line of symbol drill content.
+60% programming bigrams, 40% short identifiers."
+  (let ((words '()) (total-len 0))
+    (while (< total-len 70)
+      (let ((w (if (< (random 100) 60)
+                   (nth (random (length touchtype--programming-bigrams))
+                        touchtype--programming-bigrams)
+                 ;; Short identifier: 2-4 random lowercase letters
+                 (let* ((len (+ 2 (random 3)))
+                        (chars (cl-loop repeat len
+                                        collect (+ ?a (random 26)))))
+                   (apply #'string chars)))))
+        (push w words)
+        (cl-incf total-len (1+ (length w)))))
+    (mapconcat #'identity (nreverse words) " ")))
 
 ;;;; Key unlock logic
 

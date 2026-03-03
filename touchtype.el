@@ -283,6 +283,246 @@ With prefix ARG, set session length to that number of words."
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
+(defun touchtype-weak-letters (&optional arg)
+  "Start a touchtype session focusing on your weakest individual letters.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'weak-letters)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-weak-bigrams (&optional arg)
+  "Start a touchtype session drilling your weakest n-grams.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'weak-bigrams)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-weak-mixed (&optional arg)
+  "Start a touchtype session mixing weak-letter and weak-ngram drills.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'weak-mixed)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-quote (&optional arg)
+  "Start a touchtype session using famous quotes.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'quote)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-domain (domain)
+  "Start a touchtype session with domain-specific words.
+DOMAIN is a symbol: `medical', `legal', or `programming'."
+  (interactive
+   (list (intern (completing-read "Domain: " '("medical" "legal" "programming") nil t))))
+  (setq touchtype--domain-selection domain)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'domain-words)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-medical (&optional arg)
+  "Start a touchtype session with medical terminology.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--domain-selection 'medical)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'domain-words)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-legal (&optional arg)
+  "Start a touchtype session with legal terminology.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--domain-selection 'legal)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'domain-words)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-programming (&optional arg)
+  "Start a touchtype session with programming terminology.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--domain-selection 'programming)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'domain-words)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-left-hand (&optional arg)
+  "Start a touchtype session using only left-hand keys.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'left-hand)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-right-hand (&optional arg)
+  "Start a touchtype session using only right-hand keys.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'right-hand)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-symbol-drill (&optional arg)
+  "Start a touchtype session drilling programming symbols.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'symbol-drill)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-file (filename)
+  "Start a touchtype session with the contents of FILENAME."
+  (interactive "fFile to type: ")
+  (let ((text (with-temp-buffer
+                (insert-file-contents filename)
+                (buffer-string))))
+    (when (string-empty-p (string-trim text))
+      (user-error "File is empty"))
+    (touchtype-custom text)))
+
+;;;###autoload
+(defun touchtype-url (url)
+  "Start a touchtype session with text fetched from URL."
+  (interactive "sURL: ")
+  (require 'url)
+  (let ((text (with-current-buffer (url-retrieve-synchronously url t)
+                (goto-char (point-min))
+                (when (re-search-forward "\n\n" nil t)
+                  (delete-region (point-min) (point)))
+                (buffer-string))))
+    (when (or (null text) (string-empty-p (string-trim text)))
+      (user-error "No text retrieved from URL"))
+    (touchtype-custom text)))
+
+;;;###autoload
+(defun touchtype-code-language (language)
+  "Start a touchtype session with code snippets from LANGUAGE.
+LANGUAGE is a symbol like `python', `rust', `go', etc."
+  (interactive
+   (list (intern (completing-read "Language: "
+                                  (mapcar #'car touchtype--code-snippets-by-language)
+                                  nil t))))
+  (setq touchtype--code-language language)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'code)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-code-python (&optional arg)
+  "Start a code typing session with Python snippets.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--code-language 'python)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'code)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-code-rust (&optional arg)
+  "Start a code typing session with Rust snippets.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--code-language 'rust)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'code)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-code-go (&optional arg)
+  "Start a code typing session with Go snippets.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--code-language 'go)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'code)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-code-javascript (&optional arg)
+  "Start a code typing session with JavaScript snippets.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--code-language 'javascript)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'code)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-code-elisp (&optional arg)
+  "Start a code typing session with Emacs Lisp snippets.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--code-language 'elisp)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'code)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-code-bash (&optional arg)
+  "Start a code typing session with Bash snippets.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--code-language 'bash)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'code)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-code-sql (&optional arg)
+  "Start a code typing session with SQL snippets.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--code-language 'sql)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'code)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-code-c (&optional arg)
+  "Start a code typing session with C snippets.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--code-language 'c)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'code)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
 (defun touchtype-timed (&optional arg)
   "Start a timed touchtype session.
 With prefix ARG, set the duration in seconds."
