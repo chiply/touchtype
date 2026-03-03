@@ -199,7 +199,8 @@ Only includes bigrams with at least 5 hits.  N defaults to 10."
          (qualified
           (cl-remove-if-not
            (lambda (entry)
-             (>= (touchtype-stats--entry-get entry :hits) 5))
+             (and (= (length (car entry)) 2)
+                  (>= (touchtype-stats--entry-get entry :hits) 5)))
            bstats))
          (sorted
           (sort (copy-sequence qualified)
