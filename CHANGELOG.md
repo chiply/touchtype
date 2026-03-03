@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.4](https://github.com/chiply/touchtype/compare/v0.1.3...v0.1.4) (2026-03-03)
+
+
+### Features
+
+* add per-mode statistics, paragraph-based narrative passages, and mixed n-gram lines ([772c3bf](https://github.com/chiply/touchtype/commit/772c3bf49a936dca64360cc5504ae2af23f7458f))
+* per-mode stats, paragraph narrative passages, mixed n-gram lines ([8243f8f](https://github.com/chiply/touchtype/commit/8243f8f4849a5f0cb4f3365aaa2b9ff4cb4aa8d5))
+
+
+### Bug Fixes
+
+* filter weakest bigrams to only include 2-character entries ([d65df42](https://github.com/chiply/touchtype/commit/d65df4295a0cfa0f294a78240b8df60c7ce85711))
+
 ## [0.1.3](https://github.com/chiply/touchtype/compare/v0.1.2...v0.1.3) (2026-03-01)
 
 
