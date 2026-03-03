@@ -77,6 +77,34 @@ written back by `touchtype-stats-save'.")
   "Set KEY to VALUE in stats ENTRY, mutating it in place."
   (setcdr entry (plist-put (cdr entry) key value)))
 
+(defun touchtype-stats--mode-letter-entry (mode char)
+  "Return the stats plist for CHAR within MODE from `:mode-letter-stats'."
+  (let* ((mstats (plist-get touchtype--stats :mode-letter-stats))
+         (mode-alist (assq mode mstats))
+         entry)
+    (unless mode-alist
+      (setq mode-alist (list mode))
+      (plist-put touchtype--stats :mode-letter-stats (cons mode-alist mstats)))
+    (setq entry (assq char (cdr mode-alist)))
+    (unless entry
+      (setq entry (list char :hits 0 :misses 0 :total-ms 0 :best-ms nil))
+      (setcdr mode-alist (cons entry (cdr mode-alist))))
+    entry))
+
+(defun touchtype-stats--mode-bigram-entry (mode bigram)
+  "Return the stats plist for BIGRAM string within MODE from `:mode-bigram-stats'."
+  (let* ((mstats (plist-get touchtype--stats :mode-bigram-stats))
+         (mode-alist (assq mode mstats))
+         entry)
+    (unless mode-alist
+      (setq mode-alist (list mode))
+      (plist-put touchtype--stats :mode-bigram-stats (cons mode-alist mstats)))
+    (setq entry (assoc bigram (cdr mode-alist)))
+    (unless entry
+      (setq entry (list bigram :hits 0 :misses 0 :total-ms 0))
+      (setcdr mode-alist (cons entry (cdr mode-alist))))
+    entry))
+
 ;;;; Load / Save
 
 (defun touchtype-stats-load ()
@@ -87,12 +115,22 @@ If the file does not exist, initialise with an empty stats plist."
         (insert-file-contents touchtype-stats-file)
         (goto-char (point-min))
         (let ((raw (read (current-buffer))))
-          ;; raw is (touchtype-stats :version 1 :letter-stats ... )
-          (setq touchtype--stats (cdr raw))))
+          ;; raw is (touchtype-stats :version N :letter-stats ... )
+          (setq touchtype--stats (cdr raw))
+          ;; Migrate v1 → v2: add per-mode stats keys
+          (when (or (not (plist-get touchtype--stats :version))
+                    (< (plist-get touchtype--stats :version) 2))
+            (unless (plist-member touchtype--stats :mode-letter-stats)
+              (plist-put touchtype--stats :mode-letter-stats nil))
+            (unless (plist-member touchtype--stats :mode-bigram-stats)
+              (plist-put touchtype--stats :mode-bigram-stats nil))
+            (plist-put touchtype--stats :version 2))))
     (setq touchtype--stats
-          (list :version 1
+          (list :version 2
                 :letter-stats nil
                 :bigram-stats nil
+                :mode-letter-stats nil
+                :mode-bigram-stats nil
                 :sessions nil
                 :unlocked-keys "fj"
                 :confidence nil))))
@@ -110,10 +148,11 @@ If the file does not exist, initialise with an empty stats plist."
 
 ;;;; Recording keypresses
 
-(defun touchtype-stats-record-keypress (char correct-p elapsed-ms)
+(defun touchtype-stats-record-keypress (char correct-p elapsed-ms &optional mode)
   "Record a keypress for CHAR.
 CORRECT-P is non-nil if the key matched the target; ELAPSED-MS is the
-time in milliseconds since the previous keypress."
+time in milliseconds since the previous keypress.
+When MODE is non-nil, also record to the per-mode letter stats."
   (unless touchtype--stats (touchtype-stats-load))
   (let* ((entry (touchtype-stats--letter-entry char))
          (hits   (touchtype-stats--entry-get entry :hits))
@@ -126,12 +165,27 @@ time in milliseconds since the previous keypress."
           (touchtype-stats--entry-put entry :total-ms (+ total elapsed-ms))
           (when (or (null best) (< elapsed-ms best))
             (touchtype-stats--entry-put entry :best-ms elapsed-ms)))
-      (touchtype-stats--entry-put entry :misses (1+ misses)))))
+      (touchtype-stats--entry-put entry :misses (1+ misses))))
+  ;; Dual-write to per-mode stats
+  (when mode
+    (let* ((mentry (touchtype-stats--mode-letter-entry mode char))
+           (hits   (touchtype-stats--entry-get mentry :hits))
+           (misses (touchtype-stats--entry-get mentry :misses))
+           (total  (touchtype-stats--entry-get mentry :total-ms))
+           (best   (touchtype-stats--entry-get mentry :best-ms)))
+      (if correct-p
+          (progn
+            (touchtype-stats--entry-put mentry :hits (1+ hits))
+            (touchtype-stats--entry-put mentry :total-ms (+ total elapsed-ms))
+            (when (or (null best) (< elapsed-ms best))
+              (touchtype-stats--entry-put mentry :best-ms elapsed-ms)))
+        (touchtype-stats--entry-put mentry :misses (1+ misses))))))
 
-(defun touchtype-stats-record-bigram (bigram correct-p elapsed-ms)
+(defun touchtype-stats-record-bigram (bigram correct-p elapsed-ms &optional mode)
   "Record a keypress for BIGRAM string.
 CORRECT-P is non-nil if the bigram was typed correctly; ELAPSED-MS is
-the elapsed time in milliseconds for the second character of the bigram."
+the elapsed time in milliseconds for the second character of the bigram.
+When MODE is non-nil, also record to the per-mode bigram stats."
   (unless touchtype--stats (touchtype-stats-load))
   (let* ((entry  (touchtype-stats--bigram-entry bigram))
          (hits   (touchtype-stats--entry-get entry :hits))
@@ -141,12 +195,24 @@ the elapsed time in milliseconds for the second character of the bigram."
         (progn
           (touchtype-stats--entry-put entry :hits (1+ hits))
           (touchtype-stats--entry-put entry :total-ms (+ total elapsed-ms)))
-      (touchtype-stats--entry-put entry :misses (1+ misses)))))
+      (touchtype-stats--entry-put entry :misses (1+ misses))))
+  ;; Dual-write to per-mode stats
+  (when mode
+    (let* ((mentry (touchtype-stats--mode-bigram-entry mode bigram))
+           (hits   (touchtype-stats--entry-get mentry :hits))
+           (misses (touchtype-stats--entry-get mentry :misses))
+           (total  (touchtype-stats--entry-get mentry :total-ms)))
+      (if correct-p
+          (progn
+            (touchtype-stats--entry-put mentry :hits (1+ hits))
+            (touchtype-stats--entry-put mentry :total-ms (+ total elapsed-ms)))
+        (touchtype-stats--entry-put mentry :misses (1+ misses))))))
 
 ;;;; Confidence scoring
 
-(defun touchtype-stats-get-confidence (char)
+(defun touchtype-stats-get-confidence (char &optional mode)
   "Compute and return a confidence score 0.0–1.0 for CHAR.
+When MODE is non-nil, use per-mode letter stats instead of global.
 
 Formula (keybr-derived):
   target-ms         = 60000 / (target-wpm * 5)
@@ -157,7 +223,10 @@ Formula (keybr-derived):
 
 Returns 0.0 when no data is available."
   (unless touchtype--stats (touchtype-stats-load))
-  (let* ((entry  (assq char (plist-get touchtype--stats :letter-stats)))
+  (let* ((lstats (if mode
+                     (cdr (assq mode (plist-get touchtype--stats :mode-letter-stats)))
+                   (plist-get touchtype--stats :letter-stats)))
+         (entry  (assq char lstats))
          (hits   (if entry (touchtype-stats--entry-get entry :hits)   0))
          (misses (if entry (touchtype-stats--entry-get entry :misses) 0)))
     (if (zerop hits)
@@ -169,12 +238,16 @@ Returns 0.0 when no data is available."
              (accuracy     (/ (float hits) (+ hits misses))))
         (* accuracy speed-conf)))))
 
-(defun touchtype-stats-get-bigram-confidence (bigram)
+(defun touchtype-stats-get-bigram-confidence (bigram &optional mode)
   "Compute confidence score 0.0-1.0 for BIGRAM string.
+When MODE is non-nil, use per-mode bigram stats instead of global.
 Uses the same formula as `touchtype-stats-get-confidence' but
 applied to bigram-stats entries."
   (unless touchtype--stats (touchtype-stats-load))
-  (let* ((entry  (assoc bigram (plist-get touchtype--stats :bigram-stats)))
+  (let* ((bstats (if mode
+                     (cdr (assq mode (plist-get touchtype--stats :mode-bigram-stats)))
+                   (plist-get touchtype--stats :bigram-stats)))
+         (entry  (assoc bigram bstats))
          (hits   (if entry (touchtype-stats--entry-get entry :hits)   0))
          (misses (if entry (touchtype-stats--entry-get entry :misses) 0)))
     (if (zerop hits)
@@ -188,14 +261,18 @@ applied to bigram-stats entries."
 
 (defalias 'touchtype-stats-get-ngram-confidence #'touchtype-stats-get-bigram-confidence
   "Alias for `touchtype-stats-get-bigram-confidence'.
-Works on any string length since bigram-stats uses `assoc'.")
+Works on any string length since bigram-stats uses `assoc'.
+Inherits the optional MODE parameter.")
 
-(defun touchtype-stats-get-weak-bigrams (&optional n)
+(defun touchtype-stats-get-weak-bigrams (&optional n mode)
   "Return the N weakest bigrams sorted by confidence ascending.
-Only includes bigrams with at least 5 hits.  N defaults to 10."
+Only includes bigrams with at least 5 hits.  N defaults to 10.
+When MODE is non-nil, use per-mode bigram stats."
   (unless touchtype--stats (touchtype-stats-load))
   (let* ((n (or n 10))
-         (bstats (plist-get touchtype--stats :bigram-stats))
+         (bstats (if mode
+                     (cdr (assq mode (plist-get touchtype--stats :mode-bigram-stats)))
+                   (plist-get touchtype--stats :bigram-stats)))
          (qualified
           (cl-remove-if-not
            (lambda (entry)
@@ -205,17 +282,20 @@ Only includes bigrams with at least 5 hits.  N defaults to 10."
          (sorted
           (sort (copy-sequence qualified)
                 (lambda (a b)
-                  (< (touchtype-stats-get-bigram-confidence (car a))
-                     (touchtype-stats-get-bigram-confidence (car b)))))))
+                  (< (touchtype-stats-get-bigram-confidence (car a) mode)
+                     (touchtype-stats-get-bigram-confidence (car b) mode))))))
     (seq-take sorted n)))
 
-(defun touchtype-stats-get-weak-ngrams (min-len max-len &optional n)
+(defun touchtype-stats-get-weak-ngrams (min-len max-len &optional n mode)
   "Return the N weakest n-grams with string length between MIN-LEN and MAX-LEN.
 Only includes entries with at least 5 hits.  N defaults to 10.
-Sorted by confidence ascending."
+Sorted by confidence ascending.
+When MODE is non-nil, use per-mode bigram stats."
   (unless touchtype--stats (touchtype-stats-load))
   (let* ((n (or n 10))
-         (bstats (plist-get touchtype--stats :bigram-stats))
+         (bstats (if mode
+                     (cdr (assq mode (plist-get touchtype--stats :mode-bigram-stats)))
+                   (plist-get touchtype--stats :bigram-stats)))
          (qualified
           (cl-remove-if-not
            (lambda (entry)
@@ -227,8 +307,8 @@ Sorted by confidence ascending."
          (sorted
           (sort (copy-sequence qualified)
                 (lambda (a b)
-                  (< (touchtype-stats-get-bigram-confidence (car a))
-                     (touchtype-stats-get-bigram-confidence (car b)))))))
+                  (< (touchtype-stats-get-bigram-confidence (car a) mode)
+                     (touchtype-stats-get-bigram-confidence (car b) mode))))))
     (seq-take sorted n)))
 
 (defun touchtype-stats-get-wpm-trend (&optional n)
@@ -263,15 +343,19 @@ Return `improving' if second half > first half by >2%,
             ((< pct-change -2.0) 'declining)
             (t                   'stable)))))
 
-(defun touchtype-stats-get-weak-letters ()
-  "Return a list of letters sorted by confidence ascending.
-Letters with no data appear first."
+(defun touchtype-stats-get-weak-letters (&optional mode)
+  "Return a list of characters sorted by confidence ascending.
+Uses all characters that have recorded data.
+When MODE is non-nil, use per-mode letter stats."
   (unless touchtype--stats (touchtype-stats-load))
-  (let ((letters (string-to-list "abcdefghijklmnopqrstuvwxyz")))
-    (sort letters
+  (let* ((lstats (if mode
+                     (cdr (assq mode (plist-get touchtype--stats :mode-letter-stats)))
+                   (plist-get touchtype--stats :letter-stats)))
+         (chars (mapcar #'car lstats)))
+    (sort chars
           (lambda (a b)
-            (< (touchtype-stats-get-confidence a)
-               (touchtype-stats-get-confidence b))))))
+            (< (touchtype-stats-get-confidence a mode)
+               (touchtype-stats-get-confidence b mode))))))
 
 ;;;; Session summary
 

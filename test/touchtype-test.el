@@ -1263,6 +1263,201 @@
       ;; Header should show count
       (should (string-match-p "\\[2 of 5\\]" (buffer-string))))))
 
+;;; ─── Per-mode statistics tests ──────────────────────────────────────────────
+
+(ert-deftest touchtype-test-record-keypress-with-mode ()
+  "Recording a keypress with MODE dual-writes to global and mode stats."
+  (let ((touchtype--stats
+         (list :version 2 :letter-stats nil :bigram-stats nil
+               :mode-letter-stats nil :mode-bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil)))
+    (touchtype-stats-record-keypress ?a t 200 'full-words)
+    ;; Global stats updated
+    (let ((global (assq ?a (plist-get touchtype--stats :letter-stats))))
+      (should global)
+      (should (= 1 (touchtype-stats--entry-get global :hits))))
+    ;; Mode stats updated
+    (let* ((mode-alist (assq 'full-words (plist-get touchtype--stats :mode-letter-stats)))
+           (mode-entry (assq ?a (cdr mode-alist))))
+      (should mode-entry)
+      (should (= 1 (touchtype-stats--entry-get mode-entry :hits))))))
+
+(ert-deftest touchtype-test-record-bigram-with-mode ()
+  "Recording a bigram with MODE dual-writes to global and mode stats."
+  (let ((touchtype--stats
+         (list :version 2 :letter-stats nil :bigram-stats nil
+               :mode-letter-stats nil :mode-bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil)))
+    (touchtype-stats-record-bigram "th" t 250 'bigram-drill)
+    ;; Global stats updated
+    (let ((global (assoc "th" (plist-get touchtype--stats :bigram-stats))))
+      (should global)
+      (should (= 1 (touchtype-stats--entry-get global :hits))))
+    ;; Mode stats updated
+    (let* ((mode-alist (assq 'bigram-drill (plist-get touchtype--stats :mode-bigram-stats)))
+           (mode-entry (assoc "th" (cdr mode-alist))))
+      (should mode-entry)
+      (should (= 1 (touchtype-stats--entry-get mode-entry :hits))))))
+
+(ert-deftest touchtype-test-confidence-per-mode ()
+  "Per-mode confidence differs from global confidence."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         (fast-ms (round (/ target-ms 2.0)))
+         (slow-ms (round (* target-ms 3.0)))
+         (touchtype--stats
+          (list :version 2
+                :letter-stats (list (list ?a :hits 100 :misses 0
+                                          :total-ms (* 100 fast-ms) :best-ms fast-ms))
+                :bigram-stats nil
+                :mode-letter-stats
+                (list (cons 'full-words
+                            (list (list ?a :hits 50 :misses 10
+                                        :total-ms (* 50 slow-ms) :best-ms slow-ms))))
+                :mode-bigram-stats nil
+                :sessions nil :unlocked-keys "fj" :confidence nil))
+         (touchtype-target-wpm 40))
+    ;; Global confidence should be 1.0 (perfect accuracy, fast speed)
+    (should (= 1.0 (touchtype-stats-get-confidence ?a)))
+    ;; Mode confidence should be lower (misses + slow)
+    (let ((mode-conf (touchtype-stats-get-confidence ?a 'full-words)))
+      (should (> mode-conf 0.0))
+      (should (< mode-conf 1.0)))))
+
+(ert-deftest touchtype-test-weak-letters-per-mode ()
+  "Mode-filtered weak letters only include chars with mode-specific data."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         (fast-ms (round (/ target-ms 2.0)))
+         (slow-ms (round (* target-ms 3.0)))
+         (touchtype--stats
+          (list :version 2
+                :letter-stats (list (list ?a :hits 100 :misses 0
+                                          :total-ms (* 100 fast-ms) :best-ms fast-ms)
+                                    (list ?b :hits 100 :misses 0
+                                          :total-ms (* 100 fast-ms) :best-ms fast-ms))
+                :bigram-stats nil
+                :mode-letter-stats
+                (list (cons 'full-words
+                            (list (list ?a :hits 10 :misses 5
+                                        :total-ms (* 10 (round target-ms))
+                                        :best-ms (round target-ms))
+                                  (list ?b :hits 50 :misses 0
+                                        :total-ms (* 50 fast-ms)
+                                        :best-ms fast-ms))))
+                :mode-bigram-stats nil
+                :sessions nil :unlocked-keys "fj" :confidence nil))
+         (touchtype-target-wpm 40))
+    (let ((weak (touchtype-stats-get-weak-letters 'full-words)))
+      ;; Only chars with mode data appear
+      (should (memq ?a weak))
+      (should (memq ?b weak))
+      ;; ?a is weaker (misses + slower) so it should appear before ?b
+      (should (< (cl-position ?a weak) (cl-position ?b weak))))))
+
+(ert-deftest touchtype-test-weak-bigrams-per-mode ()
+  "Mode-filtered weak bigrams use mode-specific data."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         (touchtype--stats
+          (list :version 2
+                :letter-stats nil
+                :bigram-stats (list (list "th" :hits 10 :misses 0
+                                          :total-ms (* 10 (round target-ms))))
+                :mode-letter-stats nil
+                :mode-bigram-stats
+                (list (cons 'full-words
+                            (list (list "th" :hits 8 :misses 2
+                                        :total-ms (* 8 (round target-ms))))))
+                :sessions nil :unlocked-keys "fj" :confidence nil))
+         (touchtype-target-wpm 40))
+    ;; Global confidence: perfect accuracy, at target speed
+    (let ((global-conf (touchtype-stats-get-bigram-confidence "th"))
+          (mode-conf (touchtype-stats-get-bigram-confidence "th" 'full-words)))
+      (should (> global-conf mode-conf)))))
+
+(ert-deftest touchtype-test-stats-roundtrip-v2 ()
+  "Stats with per-mode data survive save/load roundtrip."
+  (let* ((tmp (make-temp-file "touchtype-stats-test" nil ".el"))
+         (touchtype-stats-file tmp)
+         (touchtype--stats
+          (list :version 2
+                :letter-stats (list (list ?a :hits 10 :misses 1
+                                          :total-ms 3000 :best-ms 200))
+                :bigram-stats nil
+                :mode-letter-stats
+                (list (cons 'full-words
+                            (list (list ?a :hits 5 :misses 0
+                                        :total-ms 1500 :best-ms 250))))
+                :mode-bigram-stats
+                (list (cons 'full-words
+                            (list (list "ab" :hits 3 :misses 1
+                                        :total-ms 900))))
+                :sessions nil :unlocked-keys "fj" :confidence nil)))
+    (unwind-protect
+        (progn
+          (touchtype-stats-save)
+          (setq touchtype--stats nil)
+          (touchtype-stats-load)
+          (should (= 2 (plist-get touchtype--stats :version)))
+          ;; Global letter stats preserved
+          (let ((entry (assq ?a (plist-get touchtype--stats :letter-stats))))
+            (should entry)
+            (should (= 10 (touchtype-stats--entry-get entry :hits))))
+          ;; Mode letter stats preserved
+          (let* ((mode-alist (assq 'full-words
+                                   (plist-get touchtype--stats :mode-letter-stats)))
+                 (mentry (assq ?a (cdr mode-alist))))
+            (should mentry)
+            (should (= 5 (touchtype-stats--entry-get mentry :hits))))
+          ;; Mode bigram stats preserved
+          (let* ((mode-alist (assq 'full-words
+                                   (plist-get touchtype--stats :mode-bigram-stats)))
+                 (mentry (assoc "ab" (cdr mode-alist))))
+            (should mentry)
+            (should (= 3 (touchtype-stats--entry-get mentry :hits)))))
+      (delete-file tmp))))
+
+(ert-deftest touchtype-test-v1-to-v2-migration ()
+  "Loading a v1 stats file migrates to v2 with per-mode keys initialized."
+  (let* ((tmp (make-temp-file "touchtype-stats-v1" nil ".el"))
+         (touchtype-stats-file tmp)
+         (touchtype--stats nil))
+    (unwind-protect
+        (progn
+          ;; Write a v1 stats file
+          (with-temp-file tmp
+            (let ((print-level nil)
+                  (print-length nil))
+              (pp '(touchtype-stats
+                    :version 1
+                    :letter-stats ((?f :hits 20 :misses 2 :total-ms 6000 :best-ms 200))
+                    :bigram-stats nil
+                    :sessions nil
+                    :unlocked-keys "fj"
+                    :confidence nil)
+                  (current-buffer))))
+          (touchtype-stats-load)
+          (should (= 2 (plist-get touchtype--stats :version)))
+          (should (plist-member touchtype--stats :mode-letter-stats))
+          (should (plist-member touchtype--stats :mode-bigram-stats))
+          ;; Original data preserved
+          (let ((entry (assq ?f (plist-get touchtype--stats :letter-stats))))
+            (should entry)
+            (should (= 20 (touchtype-stats--entry-get entry :hits)))))
+      (delete-file tmp))))
+
+(ert-deftest touchtype-test-record-keypress-without-mode-unchanged ()
+  "Recording without MODE only updates global stats, not mode stats."
+  (let ((touchtype--stats
+         (list :version 2 :letter-stats nil :bigram-stats nil
+               :mode-letter-stats nil :mode-bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil)))
+    (touchtype-stats-record-keypress ?z t 300)
+    ;; Global stats updated
+    (let ((global (assq ?z (plist-get touchtype--stats :letter-stats))))
+      (should global)
+      (should (= 1 (touchtype-stats--entry-get global :hits))))
+    ;; Mode stats untouched
+    (should (null (plist-get touchtype--stats :mode-letter-stats)))))
+
 (provide 'touchtype-test)
 
 ;;; touchtype-test.el ends here

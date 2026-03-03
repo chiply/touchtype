@@ -120,26 +120,34 @@ If already cached, return the path immediately."
 ;;;; Passage extraction
 
 (defun touchtype-narrative--random-passage (body)
-  "Extract a passage of ~`touchtype-narrative-passage-chars' from BODY.
-Finds a sentence boundary near a random position and reads forward."
-  (let* ((len (length body))
-         (target touchtype-narrative-passage-chars)
-         (max-start (max 0 (- len target)))
-         (pos (if (> max-start 0) (random max-start) 0)))
-    ;; Find preceding sentence boundary (. ! ? followed by space/newline)
-    (when (string-match ".*[.!?][ \n]" (substring body 0 pos))
-      (setq pos (match-end 0)))
-    ;; Read forward ~target chars
-    (let ((end (min len (+ pos target))))
-      ;; Extend to next sentence end
-      (when (and (< end len)
-                 (string-match "[.!?]" body end))
-        (setq end (min len (1+ (match-beginning 0)))))
-      ;; Clean: collapse whitespace to single spaces, trim
-      (let ((raw (substring body pos end)))
-        (setq raw (replace-regexp-in-string "[\n\r\t]+" " " raw))
-        (setq raw (replace-regexp-in-string "  +" " " raw))
-        (string-trim raw)))))
+  "Extract a prose paragraph of ~`touchtype-narrative-passage-chars' from BODY.
+Splits BODY into paragraphs, filters to those >= 100 characters,
+picks one at random, and truncates at a sentence boundary if needed."
+  (let* ((paragraphs (split-string body "\n\n+" t "[ \t\n\r]+"))
+         (long (cl-remove-if (lambda (p) (< (length p) 100)) paragraphs))
+         (chosen (if long
+                     (nth (random (length long)) long)
+                   (if paragraphs
+                       (nth (random (length paragraphs)) paragraphs)
+                     body)))
+         (target touchtype-narrative-passage-chars))
+    ;; Truncate at sentence boundary when paragraph exceeds target
+    (when (> (length chosen) target)
+      (let ((end nil))
+        (when (string-match "[.!?]" chosen target)
+          (setq end (1+ (match-beginning 0))))
+        (when end
+          (setq chosen (substring chosen 0 end)))))
+    ;; Normalize untypable characters to ASCII equivalents
+    (setq chosen (replace-regexp-in-string "[\u2018\u2019\u2032]" "'" chosen))
+    (setq chosen (replace-regexp-in-string "[\u201C\u201D\u2033]" "\"" chosen))
+    (setq chosen (replace-regexp-in-string "\u2014" "--" chosen))
+    (setq chosen (replace-regexp-in-string "\u2013" "-" chosen))
+    (setq chosen (replace-regexp-in-string "\u2026" "..." chosen))
+    ;; Collapse whitespace to single spaces and trim
+    (setq chosen (replace-regexp-in-string "[\n\r\t]+" " " chosen))
+    (setq chosen (replace-regexp-in-string "  +" " " chosen))
+    (string-trim chosen)))
 
 ;;;; Passage preparation
 

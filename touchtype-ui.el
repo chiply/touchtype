@@ -258,18 +258,10 @@ session budget so the user never sees words they won't type."
 
 (defun touchtype-ui--redraw-buffer ()
   "Redraw the entire *touchtype* buffer content.
-Completed lines appear above the active line.  Dynamic padding
-ensures the active line stays at a fixed screen row."
+Completed lines appear above the active line."
   (let* ((inhibit-read-only t)
-         (text touchtype--current-text)
-         (win (get-buffer-window (current-buffer)))
-         (target-row (if win (/ (window-height win) 3) 2))
-         (completed-count (length touchtype--completed-lines))
-         (padding (max 0 (- target-row completed-count))))
+         (text touchtype--current-text))
     (erase-buffer)
-    ;; Blank-line padding so active line starts at target-row even
-    ;; when there are few or no completed lines yet.
-    (dotimes (_ padding) (insert "\n"))
     ;; Completed lines (dim history above the active line)
     (dolist (line (reverse touchtype--completed-lines))
       (insert "  " line "\n"))
@@ -295,10 +287,7 @@ ensures the active line stays at a fixed screen row."
     (insert (touchtype-ui--status-string))
     (insert "\n")
     ;; Cursor underline on first character
-    (touchtype-ui--update-cursor-overlay)
-    ;; Scroll so the active line is at target-row from the top.
-    (when win
-      (recenter target-row))))
+    (touchtype-ui--update-cursor-overlay)))
 
 (defun touchtype-ui--update-cursor-overlay ()
   "Underline the character at `touchtype--cursor-pos' in the text line.
@@ -451,7 +440,7 @@ status line or elsewhere after each command."
       (when (and (eq touchtype-error-mode 'letter) (not correct-p))
         (cl-incf touchtype--session-total-keys)
         (cl-incf touchtype--session-errors)
-        (touchtype-stats-record-keypress expected nil elapsed)
+        (touchtype-stats-record-keypress expected nil elapsed touchtype-mode-selection)
         (touchtype-ui--update-status)
         (cl-return-from touchtype-ui--process-char))
       ;; Stop-on-error: word mode blocks at space if preceding word has errors
@@ -493,23 +482,23 @@ status line or elsewhere after each command."
               (+ touchtype--line-start-time elapsed-s)))
       (setq touchtype--last-key-time now)
       ;; Record the keypress in stats
-      (touchtype-stats-record-keypress char correct-p elapsed)
+      (touchtype-stats-record-keypress char correct-p elapsed touchtype-mode-selection)
       ;; Record bigram if we have a previous char
       (when (> pos 0)
         (let ((prev-char (aref text (1- pos))))
           (touchtype-stats-record-bigram
-           (string prev-char char) correct-p elapsed)))
+           (string prev-char char) correct-p elapsed touchtype-mode-selection)))
       ;; Record trigram
       (when (> pos 1)
         (touchtype-stats-record-bigram
          (string (aref text (- pos 2)) (aref text (1- pos)) char)
-         correct-p elapsed))
+         correct-p elapsed touchtype-mode-selection))
       ;; Record tetragram
       (when (> pos 2)
         (touchtype-stats-record-bigram
          (string (aref text (- pos 3)) (aref text (- pos 2))
                  (aref text (1- pos)) char)
-         correct-p elapsed))
+         correct-p elapsed touchtype-mode-selection))
       ;; Visual feedback
       (touchtype-ui--update-typed-char
        pos char
@@ -612,10 +601,19 @@ status line or elsewhere after each command."
     ;; Update accuracy in status
     (ignore n-correct n-total)
     ;; Check session end (only for word-count mode; timed mode ends via timer)
-    (if (and (eq touchtype-session-type 'words)
-             (>= touchtype--session-word-count touchtype-session-length))
-        (touchtype-ui--end-session)
-      (touchtype-ui--render-new-line))))
+    (cond
+     ;; Word-count target reached
+     ((and (eq touchtype-session-type 'words)
+           (>= touchtype--session-word-count touchtype-session-length))
+      (touchtype-ui--end-session))
+     ;; Custom passage exhausted: no preview texts and no more text to generate
+     ((and (eq touchtype-mode-selection 'custom)
+           (null touchtype--preview-texts)
+           touchtype--custom-passage
+           (>= touchtype--custom-offset (length touchtype--custom-passage)))
+      (touchtype-ui--end-session))
+     (t
+      (touchtype-ui--render-new-line)))))
 
 (defun touchtype-ui--consistency-score (wpms)
   "Return consistency score for WPMS list.
@@ -787,14 +785,15 @@ each section's :is-expanded flag."
          ;; Time formatted
          (time-min    (floor (/ elapsed-s 60.0)))
          (time-sec    (round (mod elapsed-s 60.0)))
-         ;; Weak letters and n-grams (full lists for expandable sections)
+         ;; Per-mode weak letters and n-grams
+         (mode touchtype-mode-selection)
          (all-weak-letters (cl-remove-if
                             (lambda (ch)
-                              (<= (touchtype-stats-get-confidence ch) 0.0))
-                            (touchtype-stats-get-weak-letters)))
-         (all-weak-bigrams (touchtype-stats-get-weak-bigrams 50))
-         (all-weak-trigrams (touchtype-stats-get-weak-ngrams 3 3 50))
-         (all-weak-tetragrams (touchtype-stats-get-weak-ngrams 4 4 50))
+                              (<= (touchtype-stats-get-confidence ch mode) 0.0))
+                            (touchtype-stats-get-weak-letters mode)))
+         (all-weak-bigrams (touchtype-stats-get-weak-bigrams 50 mode))
+         (all-weak-trigrams (touchtype-stats-get-weak-ngrams 3 3 50 mode))
+         (all-weak-tetragrams (touchtype-stats-get-weak-ngrams 4 4 50 mode))
          ;; Personal best check (before recording this session)
          (prev-best-wpm (touchtype-stats-get-personal-best
                          touchtype-mode-selection :wpm))
@@ -850,31 +849,36 @@ each section's :is-expanded flag."
         (insert (format "    Total Time:    %s\n" (touchtype-ui--format-duration total-secs))))
       (insert "\n")
       ;; Set up expandable sections (area markers bracket the region)
-      (let ((letter-fmt (lambda (ch)
-                          (format "    %c  confidence: %.2f\n"
-                                  ch (touchtype-stats-get-confidence ch))))
-            (ngram-fmt (lambda (entry)
-                         (format "    %s  confidence: %.2f\n"
-                                 (car entry)
-                                 (touchtype-stats-get-bigram-confidence
-                                  (car entry))))))
+      (let* ((mode-label (symbol-name mode))
+             (letter-fmt (lambda (ch)
+                           (format "    %c  confidence: %.2f\n"
+                                   ch (touchtype-stats-get-confidence ch mode))))
+             (ngram-fmt (lambda (entry)
+                          (format "    %s  confidence: %.2f\n"
+                                  (car entry)
+                                  (touchtype-stats-get-bigram-confidence
+                                   (car entry) mode)))))
         (setq-local touchtype-ui--expandable-sections
                     (cl-remove-if-not
                      (lambda (s) (plist-get s :trunc-items))
                      (list
-                      (list :id "letters" :header "Weakest Letters"
+                      (list :id "letters"
+                            :header (format "Weakest Letters (%s)" mode-label)
                             :trunc-items (seq-take all-weak-letters 10)
                             :full-items all-weak-letters
                             :formatter letter-fmt :is-expanded nil)
-                      (list :id "bigrams" :header "Weakest Bigrams"
+                      (list :id "bigrams"
+                            :header (format "Weakest Bigrams (%s)" mode-label)
                             :trunc-items (seq-take all-weak-bigrams 5)
                             :full-items all-weak-bigrams
                             :formatter ngram-fmt :is-expanded nil)
-                      (list :id "trigrams" :header "Weakest Trigrams"
+                      (list :id "trigrams"
+                            :header (format "Weakest Trigrams (%s)" mode-label)
                             :trunc-items (seq-take all-weak-trigrams 5)
                             :full-items all-weak-trigrams
                             :formatter ngram-fmt :is-expanded nil)
-                      (list :id "tetragrams" :header "Weakest Tetragrams"
+                      (list :id "tetragrams"
+                            :header (format "Weakest Tetragrams (%s)" mode-label)
                             :trunc-items (seq-take all-weak-tetragrams 5)
                             :full-items all-weak-tetragrams
                             :formatter ngram-fmt :is-expanded nil))))
@@ -1062,6 +1066,33 @@ Maps values to bar characters scaled min-to-max."
               (when (> hits 0)
                 (insert (format "    %c  [%s%s] %.2f  (%d hits)\n"
                                 ch bar pad conf hits)))))
+          ;; 2b. Per-Mode Confidence
+          (let ((mode-lstats (plist-get touchtype--stats :mode-letter-stats)))
+            (when mode-lstats
+              (insert (propertize "\n  Per-Mode Confidence\n" 'face 'bold))
+              (dolist (mode-entry mode-lstats)
+                (let* ((m (car mode-entry))
+                       (m-letters (cdr mode-entry)))
+                  (when m-letters
+                    (insert (propertize (format "    %s\n" m) 'face 'bold))
+                    (let ((weak (seq-take
+                                 (sort (cl-remove-if
+                                        (lambda (ch)
+                                          (<= (touchtype-stats-get-confidence ch m) 0.0))
+                                        (touchtype-stats-get-weak-letters m))
+                                       (lambda (a b)
+                                         (< (touchtype-stats-get-confidence a m)
+                                            (touchtype-stats-get-confidence b m))))
+                                 10)))
+                      (dolist (ch weak)
+                        (let* ((entry (assq ch m-letters))
+                               (hits  (if entry (touchtype-stats--entry-get entry :hits) 0))
+                               (conf  (touchtype-stats-get-confidence ch m))
+                               (bar   (make-string (round (* 20 conf)) ?|))
+                               (pad   (make-string (- 20 (round (* 20 conf))) ?.)))
+                          (when (> hits 0)
+                            (insert (format "      %c  [%s%s] %.2f  (%d hits)\n"
+                                            ch bar pad conf hits)))))))))))
           ;; 3. Weakest bigrams
           (insert (propertize "\n  Weakest Bigrams\n" 'face 'bold))
           (let ((weak-bigrams (touchtype-stats-get-weak-bigrams 10)))
