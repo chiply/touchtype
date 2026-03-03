@@ -94,6 +94,12 @@ character more than twice in a row."
               prev ch)))
     (apply #'string (nreverse word))))
 
+(defun touchtype-algo--random-token (chars)
+  "Generate a short random token (1-4 chars) from CHARS string."
+  (let* ((len (1+ (random 4)))
+         (n (length chars)))
+    (apply #'string (cl-loop repeat len collect (aref chars (random n))))))
+
 (defun touchtype-algo-generate-word (allowed-chars &optional focused-char)
   "Generate a pseudo-word using only characters in ALLOWED-CHARS string.
 If FOCUSED-CHAR is non-nil, approximately 40% of generated words are
@@ -186,24 +192,33 @@ ALLOWED-CHARS; falls back to pseudo-word generation when fewer than
 ;;;; N-gram drill
 
 (defun touchtype-algo-ngram-line (ngrams &optional n-repeats)
-  "Return a line of repeated n-grams from NGRAMS list.
-N-REPEATS is the number of repetitions; when nil the function fills
-to ~75 characters.  N-grams containing chars not in
-`touchtype--unlocked-keys' are skipped."
+  "Return a line of mixed n-grams from NGRAMS list.
+N-REPEATS is the number of n-grams; when nil the function fills
+to ~75 characters.  In progressive mode, n-grams are filtered to
+those whose characters are all in `touchtype--unlocked-keys'."
   (let* ((available
-          (cl-remove-if-not
-           (lambda (ng)
-             (cl-every (lambda (c)
-                         (seq-contains-p touchtype--unlocked-keys c #'=))
-                       ng))
-           ngrams)))
-    (when (null available)
-      (setq available (list (car ngrams))))  ; minimal fallback
-    (let* ((chosen (nth (random (length available)) available))
-           (n (or n-repeats
-                  (max 4 (/ 75 (1+ (length chosen))))))
-           (repeated (cl-loop repeat n collect chosen)))
-      (mapconcat #'identity repeated " "))))
+          (if (eq touchtype-mode-selection 'progressive)
+              (or (cl-remove-if-not
+                   (lambda (ng)
+                     (cl-every (lambda (c)
+                                 (seq-contains-p touchtype--unlocked-keys c #'=))
+                               ng))
+                   ngrams)
+                  (list (car ngrams)))
+            ngrams)))
+    (let* ((pool-len (length available))
+           (picks (if n-repeats
+                      (cl-loop repeat n-repeats
+                               collect (nth (random pool-len) available))
+                    ;; Fill to ~75 characters with a mix of n-grams
+                    (let ((parts nil)
+                          (total 0))
+                      (while (< total 75)
+                        (let ((ng (nth (random pool-len) available)))
+                          (push ng parts)
+                          (cl-incf total (1+ (length ng)))))
+                      (nreverse parts)))))
+      (mapconcat #'identity picks " "))))
 
 (defun touchtype-algo-bigram-line (&optional n-bigrams)
   "Return a line of repeated bigrams for bigram-drill mode.
@@ -319,12 +334,19 @@ The line targets ~75 characters and is space-separated words."
            (focus-char (if (eq touchtype-mode-selection 'progressive)
                            (touchtype-algo--pick-focus-char)
                          touchtype--focused-key))
+           (extra-chars (pcase touchtype-mode-selection
+                          ('letters+numbers touchtype--numbers)
+                          ('letters+numbers+symbols
+                           (concat touchtype--numbers touchtype--symbols))
+                          (_ nil)))
            (pick-fn (if (memq touchtype-mode-selection '(full-words))
                         (lambda () (touchtype-algo-pick-word allowed))
                       (lambda ()
                         (touchtype-algo-generate-word allowed focus-char)))))
       (while (< total-len 70)
-        (let ((w (funcall pick-fn)))
+        (let ((w (if (and extra-chars (< (random 100) 30))
+                     (touchtype-algo--random-token extra-chars)
+                   (funcall pick-fn))))
           (when w
             (push w words)
             (cl-incf total-len (1+ (length w))))))

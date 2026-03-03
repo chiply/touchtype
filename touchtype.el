@@ -290,6 +290,7 @@ With prefix ARG, set the duration in seconds."
   (when arg
     (setq touchtype-session-duration (prefix-numeric-value arg)))
   (setq touchtype-session-type 'timed)
+  (setq touchtype-mode-selection 'full-words)
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
