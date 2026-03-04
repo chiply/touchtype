@@ -417,8 +417,7 @@ Used by `touchtype-algo-ngram-line' for tetragram-drill mode.")
            "for (int i = 0; i < n; i++) {" "while (*p != '\\0') p++;"
            "free(buf); buf = NULL;" "#define MAX(a, b) ((a) > (b) ? (a) : (b))"
            "size_t len = strlen(s);" "memcpy(dst, src, n);"
-           "switch (op) { case '+':"])
-    )
+           "switch (op) { case '+':"]))
   "Alist mapping language symbols to vectors of code snippets.")
 
 (defconst touchtype--code-snippets
