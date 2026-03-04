@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/chiply/touchtype/compare/v0.1.7...v0.1.8) (2026-03-04)
+
+
+### Bug Fixes
+
+* install Nix before magic-nix-cache-action in CI ([0fc1f4a](https://github.com/chiply/touchtype/commit/0fc1f4afa3a2a032d46bb1e9d7486946f7cbd16c))
+
 ## [0.1.7](https://github.com/chiply/touchtype/compare/v0.1.6...v0.1.7) (2026-03-04)
 
 
