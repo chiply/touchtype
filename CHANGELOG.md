@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.5](https://github.com/chiply/touchtype/compare/v0.1.4...v0.1.5) (2026-03-04)
+
+
+### Features
+
+* add 14 new features across 6 phases ([a86838b](https://github.com/chiply/touchtype/commit/a86838b259af8a75b139774e0485dfde910b014d))
+
+
+### Bug Fixes
+
+* resolve package-lint errors for CI ([1a690cb](https://github.com/chiply/touchtype/commit/1a690cb511da1715adc02b412150594e20536f27))
+
 ## [0.1.4](https://github.com/chiply/touchtype/compare/v0.1.3...v0.1.4) (2026-03-03)
 
 
