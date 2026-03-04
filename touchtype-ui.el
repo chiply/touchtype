@@ -122,7 +122,10 @@ installs command remaps as a safety net for minor-mode bindings."
                        touchtype--code-block-lines
                        touchtype--paused
                        touchtype--pause-start-time
-                       touchtype--pause-overlay))
+                       touchtype--pause-overlay
+                       touchtype--word-streak
+                       touchtype--best-word-streak
+                       touchtype--perfect-line-achieved))
           (make-local-variable sym))
         ;; Load persisted state
         (touchtype-stats-load)
@@ -145,7 +148,10 @@ installs command remaps as a safety net for minor-mode bindings."
               touchtype--completed-lines     nil
               touchtype--paused              nil
               touchtype--pause-start-time    nil
-              touchtype--pause-overlay       nil)
+              touchtype--pause-overlay       nil
+              touchtype--word-streak         0
+              touchtype--best-word-streak    0
+              touchtype--perfect-line-achieved nil)
         (setq touchtype-ui--keymap (touchtype-ui--make-keymap))
         (use-local-map touchtype-ui--keymap)
         (setq-local cursor-type nil)
@@ -424,12 +430,18 @@ _CHAR is accepted for API compatibility but unused."
          (net-str   (if (> total 0) (format "%.0f" net) "--"))
          (gross-str (if (> total 0) (format "%.0f" gross) "--"))
          (acc-str   (if (> total 0) (format "%.0f%%" acc) "--"))
-         (line1 (format "  Net: %s  Gross: %s  Acc: %s  Consistency: %s"
-                         net-str gross-str acc-str cons-str))
+         (streak-str (if (and (boundp 'touchtype--word-streak)
+                            (> touchtype--word-streak 0))
+                        (format "  Streak: %d" touchtype--word-streak)
+                      ""))
+         (lv-str (format "  Lv%d" (touchtype-stats-get-level)))
+         (line1 (format "  Net: %s  Gross: %s  Acc: %s  Consistency: %s%s%s"
+                         net-str gross-str acc-str cons-str streak-str lv-str))
+         (unlock-str (or (touchtype-ui--unlock-progress-string) ""))
          (diff-str (if (eq touchtype-difficulty 'normal) ""
                      (format " [%s]" touchtype-difficulty)))
-         (line2 (format "  Time: %s  Words: %s  Corrections: %d  Mode: %s%s%s"
-                         time-str words corr mode diff-str keys)))
+         (line2 (format "  Time: %s  Words: %s  Corrections: %d  Mode: %s%s%s%s"
+                         time-str words corr mode diff-str keys unlock-str)))
     (propertize (concat line1 "\n" line2) 'face 'touchtype-face-status)))
 
 (defun touchtype-ui--enforce-point ()
@@ -670,6 +682,19 @@ Shows SESSION FAILED header and records :failed t in session."
       (push (list char correct-p elapsed) touchtype--typed-chars)
       (cl-incf touchtype--session-total-keys)
       (unless correct-p (cl-incf touchtype--session-errors))
+      ;; Word streak: check when space is typed
+      (when (and expected (= expected ?\s) correct-p)
+        (let ((word-correct t))
+          ;; Walk backward through typed-chars to check the word
+          ;; typed-chars is reversed (most recent first), skip the space we just pushed
+          (let ((chars (cdr touchtype--typed-chars)))
+            (while (and chars
+                        (let ((rec (car chars)))
+                          (not (= (car rec) ?\s))))
+              (unless (cadr (car chars))
+                (setq word-correct nil))
+              (setq chars (cdr chars))))
+          (touchtype-ui--update-word-streak word-correct)))
       ;; Advance cursor
       (setq touchtype--cursor-pos (1+ pos))
       (touchtype-ui--update-cursor-overlay)
@@ -749,6 +774,20 @@ Shows SESSION FAILED header and records :failed t in session."
          (n-correct  (length (cl-remove-if-not #'cadr touchtype--typed-chars)))
          (n-total    (length touchtype--typed-chars))
          (word-count (touchtype-ui--line-word-count)))
+    ;; Check last word on line for word streak
+    (let ((word-correct t))
+      (let ((chars touchtype--typed-chars))
+        (while (and chars
+                    (let ((rec (car chars)))
+                      (not (= (car rec) ?\s))))
+          (unless (cadr (car chars))
+            (setq word-correct nil))
+          (setq chars (cdr chars))))
+      (touchtype-ui--update-word-streak word-correct))
+    ;; Check for perfect line (0 errors, WPM > 80)
+    (when (and (> wpm 80)
+               (= n-correct n-total))
+      (setq touchtype--perfect-line-achieved t))
     ;; Record WPM sample
     (when (> wpm 0)
       (push wpm touchtype--session-wpm-samples)
@@ -910,6 +949,124 @@ each section's :is-expanded flag."
                   (setq found t)
                 (forward-line 1)))))))))
 
+(defun touchtype-ui--progress-bar (pct width)
+  "Return a WIDTH-char progress bar showing PCT percent (0-100).
+Uses Unicode block characters: filled=█ empty=░."
+  (let* ((ratio (min 1.0 (max 0.0 (/ pct 100.0))))
+         (filled (round (* ratio width)))
+         (empty (- width filled)))
+    (concat (make-string filled ?█) (make-string empty ?░))))
+
+(defun touchtype-ui--xp-progress-bar ()
+  "Return string showing XP progress to next level.
+Format: [████████░░] 73% to Level 8: Skilled"
+  (let* ((level (touchtype-stats-get-level))
+         (max-level (1- (length touchtype--xp-level-thresholds))))
+    (if (>= level max-level)
+        "MAX LEVEL"
+      (let* ((current-xp (touchtype-stats-get-xp))
+             (level-start (aref touchtype--xp-level-thresholds level))
+             (level-end (aref touchtype--xp-level-thresholds (1+ level)))
+             (progress (- current-xp level-start))
+             (needed (- level-end level-start))
+             (pct (min 100 (round (* 100.0 (/ (float progress) needed)))))
+             (next-title (aref touchtype--level-titles
+                               (min (1+ level) (1- (length touchtype--level-titles)))))
+             (bar (touchtype-ui--progress-bar pct 10)))
+        (format "%s %d%% to Level %d: %s" bar pct (1+ level) next-title)))))
+
+(defun touchtype-ui--unlock-progress-string ()
+  "Return string showing progress toward next key unlock, or nil.
+Returns nil when not in progressive mode or all keys unlocked."
+  (when (touchtype-algo--progressive-p)
+    (let* ((order (touchtype-algo--unlock-order))
+           (next-char (cl-find-if-not
+                       (lambda (ch)
+                         (seq-contains-p touchtype--unlocked-keys ch #'=))
+                       order)))
+      (when next-char
+        (let* ((min-conf 1.0)
+               (keys (string-to-list touchtype--unlocked-keys))
+               ;; Get position of next key in unlock order
+               (pos (1+ (length touchtype--unlocked-keys)))
+               (threshold (if (and (boundp 'touchtype-graduated-thresholds)
+                                   touchtype-graduated-thresholds)
+                              (touchtype-algo--graduated-threshold pos)
+                            touchtype-unlock-threshold)))
+          ;; Find minimum confidence among unlocked keys
+          (dolist (ch keys)
+            (let ((conf (touchtype-stats-get-confidence ch)))
+              (when (< conf min-conf)
+                (setq min-conf conf))))
+          (let* ((pct (min 100 (round (* 100 (/ min-conf threshold)))))
+                 (bar (touchtype-ui--progress-bar pct 8)))
+            (format "  Next: '%c' %s %d%%" next-char bar pct)))))))
+
+(defun touchtype-ui--update-word-streak (correct-p)
+  "Update word streak counter.
+CORRECT-P is non-nil if the word was typed correctly."
+  (if correct-p
+      (progn
+        (cl-incf touchtype--word-streak)
+        (when (> touchtype--word-streak touchtype--best-word-streak)
+          (setq touchtype--best-word-streak touchtype--word-streak)))
+    (setq touchtype--word-streak 0)))
+
+(defun touchtype-ui--near-miss-messages (net-wpm accuracy session-xp total-keys mode is-pb new-achievements)
+  "Return list of near-miss message strings for the session.
+NET-WPM, ACCURACY, SESSION-XP, TOTAL-KEYS are session metrics.
+MODE is the training mode symbol.  IS-PB is non-nil if a personal best.
+NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
+  (let ((msgs nil))
+    ;; WPM within 5% of PB (only if not already a PB)
+    (unless is-pb
+      (let ((pb (touchtype-stats-get-personal-best mode :wpm)))
+        (when (and pb (> pb 0) (> net-wpm 0))
+          (let ((threshold (* pb 0.95)))
+            (when (and (>= net-wpm threshold) (< net-wpm pb))
+              (push (format "%.1f WPM — only %.1f from your personal best!"
+                            net-wpm (- pb net-wpm))
+                    msgs))))))
+    ;; Accuracy within 2% of unearned accuracy achievement
+    (let ((earned (touchtype-stats-get-achievements))
+          (thresholds '((accuracy-95 . 95) (accuracy-99 . 99) (accuracy-100 . 100))))
+      (dolist (pair thresholds)
+        (unless (or (memq (car pair) earned)
+                    (memq (car pair) new-achievements))
+          (let ((target (cdr pair)))
+            (when (and (>= accuracy (- target 2)) (< accuracy target))
+              (push (format "%.1f%% accuracy — only %.1f%% from %s achievement!"
+                            accuracy (- target accuracy)
+                            (symbol-name (car pair)))
+                    msgs))))))
+    ;; XP within 20% of next level
+    (let ((xp-to-next (touchtype-stats-xp-to-next-level)))
+      (when (and (> xp-to-next 0) (> session-xp 0))
+        (let ((threshold (* xp-to-next 0.2)))
+          (when (<= xp-to-next (max threshold session-xp))
+            (let* ((level (touchtype-stats-get-level))
+                   (next-level (1+ level))
+                   (title (aref touchtype--level-titles
+                                (min next-level (1- (length touchtype--level-titles))))))
+              (push (format "Only %d XP to level %d: %s!"
+                            xp-to-next next-level title)
+                    msgs))))))
+    ;; Speed within 10% of unearned speed achievement
+    (let ((earned (touchtype-stats-get-achievements))
+          (thresholds '((speed-30 . 30) (speed-50 . 50) (speed-70 . 70)
+                        (speed-100 . 100) (speed-40 . 40) (speed-60 . 60)
+                        (speed-80 . 80) (speed-120 . 120) (speed-150 . 150))))
+      (dolist (pair thresholds)
+        (unless (or (memq (car pair) earned)
+                    (memq (car pair) new-achievements))
+          (let ((target (cdr pair)))
+            (when (and (>= net-wpm (* target 0.90)) (< net-wpm target))
+              (push (format "%.0f WPM — only %.0f from %s achievement!"
+                            net-wpm (- target net-wpm)
+                            (symbol-name (car pair)))
+                    msgs))))))
+    (nreverse msgs)))
+
 (defun touchtype-ui--end-session ()
   "Display the session summary and prompt to continue or quit."
   ;; Cancel any active timers
@@ -962,7 +1119,7 @@ each section's :is-expanded flag."
          (prev-best-wpm (touchtype-stats-get-personal-best
                          touchtype-mode-selection :wpm))
          (is-pb        (and prev-best-wpm (> net-wpm prev-best-wpm))))
-    ;; Record the session with extended fields
+    ;; XP and achievements
     (touchtype-stats-record-session
      net-wpm accuracy touchtype-mode-selection touchtype--session-word-count
      :gross-wpm gross-wpm
@@ -970,14 +1127,21 @@ each section's :is-expanded flag."
      :total-chars total-keys
      :corrections corrections
      :uncorrected-errors uncorrected
-     :consistency consistency)
+     :consistency consistency
+     :difficulty touchtype-difficulty)
     (touchtype-stats-update-streak-and-time elapsed-s)
-    ;; XP and achievements
-    (let* ((session-xp (touchtype-stats-xp-for-session
-                        net-wpm accuracy touchtype--session-word-count))
+    (let* ((streak (touchtype-stats-get-streak))
+           (session-xp (touchtype-stats-xp-for-session
+                        net-wpm accuracy touchtype--session-word-count
+                        :streak streak
+                        :is-pb is-pb
+                        :difficulty touchtype-difficulty
+                        :consistency consistency
+                        :accuracy-perfect (>= accuracy 100)))
            (old-level (touchtype-stats-get-level)))
       (touchtype-stats-add-xp session-xp)
-      (let ((new-achievements (touchtype-stats-check-achievements net-wpm accuracy))
+      (let ((new-achievements (touchtype-stats-check-achievements
+                              net-wpm accuracy touchtype--session-word-count consistency))
             (new-level (touchtype-stats-get-level))
             (level-up-p (> (touchtype-stats-get-level) old-level)))
     (touchtype-stats-save)
@@ -992,10 +1156,12 @@ each section's :is-expanded flag."
       (when is-pb
         (insert "*New Personal Best!*\n"))
       (when level-up-p
-        (insert (format "*Level Up! Level %d: %s*\n"
-                        new-level
-                        (aref touchtype--level-titles
-                              (min new-level (1- (length touchtype--level-titles)))))))
+        (let ((msg (format "Level Up! Level %d: %s"
+                           new-level
+                           (aref touchtype--level-titles
+                                 (min new-level (1- (length touchtype--level-titles)))))))
+          (insert (propertize (concat "*" msg "*\n")
+                              'face '(:foreground "green" :weight bold)))))
       (when new-achievements
         (dolist (id new-achievements)
           (let ((ach (cl-find id touchtype--achievements
@@ -1003,6 +1169,14 @@ each section's :is-expanded flag."
             (when ach
               (insert (format "*Achievement Unlocked: %s*\n"
                               (plist-get ach :name)))))))
+      ;; Near-miss feedback
+      (let ((near-misses (touchtype-ui--near-miss-messages
+                          net-wpm accuracy session-xp total-keys
+                          mode is-pb new-achievements)))
+        (when near-misses
+          (insert "\n** Almost There!\n")
+          (dolist (msg near-misses)
+            (insert (format "- %s\n" msg)))))
       ;; Speed
       (insert "\n** Speed\n")
       (insert "| Metric    |  Value |\n")
@@ -1027,6 +1201,8 @@ each section's :is-expanded flag."
       (insert (format "| Corrections | %d |\n" corrections))
       (insert (format "| Uncorrected | %d |\n" uncorrected))
       (insert (format "| Consistency | %.0f%% |\n" consistency))
+      (when (> touchtype--best-word-streak 0)
+        (insert (format "| Best Streak | %d words |\n" touchtype--best-word-streak)))
       ;; WPM sparkline
       (when (>= (length line-wpms) 2)
         (let* ((wpms (reverse line-wpms))
@@ -1037,18 +1213,34 @@ each section's :is-expanded flag."
                           (apply #'max wpms)))))
       ;; Streak and practice time
       (let ((streak (touchtype-stats-get-streak))
-            (total-secs (touchtype-stats-get-total-practice-time)))
+            (total-secs (touchtype-stats-get-total-practice-time))
+            (freezes (touchtype-stats-get-streak-freezes))
+            (best-streak (touchtype-stats-get-best-streak)))
         (insert (format "| Streak      | %d day%s |\n" streak (if (= streak 1) "" "s")))
+        (when (> best-streak streak)
+          (insert (format "| Best Streak | %d days |\n" best-streak)))
+        (insert (format "| Freezes     | %d |\n" freezes))
         (insert (format "| Total Time  | %s |\n" (touchtype-ui--format-duration total-secs))))
       ;; XP and level display
       (let* ((xp-to-next (touchtype-stats-xp-to-next-level))
              (level-title (aref touchtype--level-titles
-                                (min new-level (1- (length touchtype--level-titles))))))
-        (insert (format "| XP          | +%s Level %d: %s |\n"
-                        (number-to-string session-xp)
-                        new-level level-title))
-        (when (> xp-to-next 0)
-          (insert (format "| To Next     | %d XP |\n" xp-to-next))))
+                                (min new-level (1- (length touchtype--level-titles)))))
+             (breakdown (touchtype-stats-xp-breakdown
+                         net-wpm accuracy touchtype--session-word-count
+                         :streak streak :is-pb is-pb
+                         :difficulty touchtype-difficulty
+                         :consistency consistency
+                         :accuracy-perfect (>= accuracy 100)))
+             (total-mult (plist-get breakdown :total-mult)))
+        (if (and touchtype-xp-multipliers-enabled (> total-mult 1.0))
+            (insert (format "| XP          | +%d (base %d x %.2f) Level %d: %s |\n"
+                            session-xp (plist-get breakdown :base)
+                            total-mult new-level level-title))
+          (insert (format "| XP          | +%s Level %d: %s |\n"
+                          (number-to-string session-xp)
+                          new-level level-title)))
+        (let ((xp-bar (touchtype-ui--xp-progress-bar)))
+          (insert (format "| Progress    | %s |\n" xp-bar))))
       ;; Session delta (vs rolling average)
       (let ((avg-wpm (touchtype-stats-get-rolling-average
                       touchtype-rolling-average-window :wpm))
@@ -1109,7 +1301,10 @@ each section's :is-expanded flag."
         touchtype--preview-texts       nil
         touchtype--completed-lines     nil
         touchtype--paused              nil
-        touchtype--pause-start-time    nil)
+        touchtype--pause-start-time    nil
+        touchtype--word-streak         0
+        touchtype--best-word-streak    0
+        touchtype--perfect-line-achieved nil)
   (when (overlayp touchtype--pause-overlay)
     (delete-overlay touchtype--pause-overlay)
     (setq touchtype--pause-overlay nil))

@@ -67,7 +67,7 @@ written back by `touchtype-stats-save'.")
   (let* ((lstats (plist-get touchtype--stats :letter-stats))
          (entry (assq char lstats)))
     (unless entry
-      (setq entry (list char :hits 0 :misses 0 :total-ms 0 :best-ms nil))
+      (setq entry (list char :hits 0 :misses 0 :total-ms 0 :best-ms nil :ema-ms nil))
       (plist-put touchtype--stats :letter-stats (cons entry lstats)))
     entry))
 
@@ -76,7 +76,7 @@ written back by `touchtype-stats-save'.")
   (let* ((bstats (plist-get touchtype--stats :bigram-stats))
          (entry (assoc bigram bstats)))
     (unless entry
-      (setq entry (list bigram :hits 0 :misses 0 :total-ms 0))
+      (setq entry (list bigram :hits 0 :misses 0 :total-ms 0 :ema-ms nil))
       (plist-put touchtype--stats :bigram-stats (cons entry bstats)))
     entry))
 
@@ -140,9 +140,32 @@ If the file does not exist, initialise with an empty stats plist."
           (when (< (plist-get touchtype--stats :version) 3)
             (unless (plist-member touchtype--stats :word-stats)
               (plist-put touchtype--stats :word-stats nil))
-            (plist-put touchtype--stats :version 3))))
+            (plist-put touchtype--stats :version 3))
+          ;; Migrate v3 → v4: add :ema-ms to letter and bigram stats
+          (when (< (plist-get touchtype--stats :version) 4)
+            (dolist (entry (plist-get touchtype--stats :letter-stats))
+              (let ((hits (touchtype-stats--entry-get entry :hits))
+                    (total-ms (touchtype-stats--entry-get entry :total-ms)))
+                (when (and (> hits 0) (not (touchtype-stats--entry-get entry :ema-ms)))
+                  (touchtype-stats--entry-put entry :ema-ms (/ (float total-ms) hits)))))
+            (dolist (entry (plist-get touchtype--stats :bigram-stats))
+              (let ((hits (touchtype-stats--entry-get entry :hits))
+                    (total-ms (touchtype-stats--entry-get entry :total-ms)))
+                (when (and (> hits 0) (not (touchtype-stats--entry-get entry :ema-ms)))
+                  (touchtype-stats--entry-put entry :ema-ms (/ (float total-ms) hits)))))
+            (plist-put touchtype--stats :version 4))
+          ;; Migrate v4 → v5: add streak freeze fields
+          (when (< (plist-get touchtype--stats :version) 5)
+            (unless (plist-member touchtype--stats :streak-freezes-available)
+              (plist-put touchtype--stats :streak-freezes-available touchtype-streak-freeze-count))
+            (unless (plist-member touchtype--stats :streak-best)
+              (plist-put touchtype--stats :streak-best
+                         (or (plist-get touchtype--stats :daily-streak) 0)))
+            (unless (plist-member touchtype--stats :streak-consecutive-days)
+              (plist-put touchtype--stats :streak-consecutive-days 0))
+            (plist-put touchtype--stats :version 5))))
     (setq touchtype--stats
-          (list :version 3
+          (list :version 5
                 :letter-stats nil
                 :bigram-stats nil
                 :mode-letter-stats nil
@@ -150,7 +173,10 @@ If the file does not exist, initialise with an empty stats plist."
                 :word-stats nil
                 :sessions nil
                 :unlocked-keys "fj"
-                :confidence nil))))
+                :confidence nil
+                :streak-freezes-available touchtype-streak-freeze-count
+                :streak-best 0
+                :streak-consecutive-days 0))))
 
 (defun touchtype-stats-save ()
   "Write `touchtype--stats' to `touchtype-stats-file'."
@@ -181,7 +207,15 @@ When MODE is non-nil, also record to the per-mode letter stats."
           (touchtype-stats--entry-put entry :hits (1+ hits))
           (touchtype-stats--entry-put entry :total-ms (+ total elapsed-ms))
           (when (or (null best) (< elapsed-ms best))
-            (touchtype-stats--entry-put entry :best-ms elapsed-ms)))
+            (touchtype-stats--entry-put entry :best-ms elapsed-ms))
+          ;; Update EMA
+          (let ((old-ema (touchtype-stats--entry-get entry :ema-ms)))
+            (touchtype-stats--entry-put
+             entry :ema-ms
+             (if old-ema
+                 (+ (* touchtype-confidence-ema-alpha elapsed-ms)
+                    (* (- 1.0 touchtype-confidence-ema-alpha) old-ema))
+               (float elapsed-ms)))))
       (touchtype-stats--entry-put entry :misses (1+ misses))))
   ;; Dual-write to per-mode stats
   (when mode
@@ -211,7 +245,15 @@ When MODE is non-nil, also record to the per-mode bigram stats."
     (if correct-p
         (progn
           (touchtype-stats--entry-put entry :hits (1+ hits))
-          (touchtype-stats--entry-put entry :total-ms (+ total elapsed-ms)))
+          (touchtype-stats--entry-put entry :total-ms (+ total elapsed-ms))
+          ;; Update EMA
+          (let ((old-ema (touchtype-stats--entry-get entry :ema-ms)))
+            (touchtype-stats--entry-put
+             entry :ema-ms
+             (if old-ema
+                 (+ (* touchtype-confidence-ema-alpha elapsed-ms)
+                    (* (- 1.0 touchtype-confidence-ema-alpha) old-ema))
+               (float elapsed-ms)))))
       (touchtype-stats--entry-put entry :misses (1+ misses))))
   ;; Dual-write to per-mode stats
   (when mode
@@ -249,11 +291,15 @@ Returns 0.0 when no data is available."
     (if (zerop hits)
         0.0
       (let* ((total-ms     (touchtype-stats--entry-get entry :total-ms))
+             (ema-ms       (touchtype-stats--entry-get entry :ema-ms))
              (target-ms    (/ 60000.0 (* touchtype-target-wpm 5)))
-             (avg-ms       (/ (float total-ms) hits))
+             (avg-ms       (if (and touchtype-confidence-use-ema ema-ms)
+                               ema-ms
+                             (/ (float total-ms) hits)))
              (speed-conf   (min 1.0 (/ target-ms avg-ms)))
-             (accuracy     (/ (float hits) (+ hits misses))))
-        (* accuracy speed-conf)))))
+             (accuracy     (/ (float hits) (+ hits misses)))
+             (sample-scale (min 1.0 (/ (float hits) touchtype-confidence-min-samples))))
+        (* accuracy speed-conf sample-scale)))))
 
 (defun touchtype-stats-get-bigram-confidence (bigram &optional mode)
   "Compute confidence score 0.0-1.0 for BIGRAM string.
@@ -270,11 +316,15 @@ applied to bigram-stats entries."
     (if (zerop hits)
         0.0
       (let* ((total-ms     (touchtype-stats--entry-get entry :total-ms))
+             (ema-ms       (touchtype-stats--entry-get entry :ema-ms))
              (target-ms    (/ 60000.0 (* touchtype-target-wpm 5)))
-             (avg-ms       (/ (float total-ms) hits))
+             (avg-ms       (if (and touchtype-confidence-use-ema ema-ms)
+                               ema-ms
+                             (/ (float total-ms) hits)))
              (speed-conf   (min 1.0 (/ target-ms avg-ms)))
-             (accuracy     (/ (float hits) (+ hits misses))))
-        (* accuracy speed-conf)))))
+             (accuracy     (/ (float hits) (+ hits misses)))
+             (sample-scale (min 1.0 (/ (float hits) touchtype-confidence-min-samples))))
+        (* accuracy speed-conf sample-scale)))))
 
 (defalias 'touchtype-stats-get-ngram-confidence #'touchtype-stats-get-bigram-confidence
   "Alias for `touchtype-stats-get-bigram-confidence'.
@@ -408,8 +458,9 @@ Returns 0.0 if no data."
              (target-ms  (/ 60000.0 (* touchtype-target-wpm 5)))
              (avg-ms     (/ (float total-ms) (* hits word-len)))
              (speed-conf (min 1.0 (/ target-ms avg-ms)))
-             (accuracy   (/ (float hits) (+ hits misses))))
-        (* accuracy speed-conf)))))
+             (accuracy   (/ (float hits) (+ hits misses)))
+             (sample-scale (min 1.0 (/ (float hits) touchtype-confidence-min-samples))))
+        (* accuracy speed-conf sample-scale)))))
 
 (defun touchtype-stats-get-weak-words (&optional n)
   "Return N weakest words sorted by confidence ascending.
@@ -508,12 +559,16 @@ for MODE exist."
 (defun touchtype-stats-update-streak-and-time (elapsed-seconds)
   "Update daily streak and total practice time with ELAPSED-SECONDS.
 Call at session end.  Same day: add time, streak unchanged.
-Consecutive day: streak + 1.  Gap: streak resets to 1."
+Consecutive day: streak + 1, recharge freeze if threshold met.
+Gap: consume freeze if available, else reset to 1."
   (unless touchtype--stats (touchtype-stats-load))
   (let* ((today (format-time-string "%Y-%m-%d"))
          (last-date (plist-get touchtype--stats :last-practice-date))
          (old-streak (or (plist-get touchtype--stats :daily-streak) 0))
-         (old-time (or (plist-get touchtype--stats :total-practice-time) 0)))
+         (old-time (or (plist-get touchtype--stats :total-practice-time) 0))
+         (freezes (or (plist-get touchtype--stats :streak-freezes-available) 0))
+         (best-streak (or (plist-get touchtype--stats :streak-best) 0))
+         (consec-days (or (plist-get touchtype--stats :streak-consecutive-days) 0)))
     (plist-put touchtype--stats :total-practice-time
                (+ old-time elapsed-seconds))
     (plist-put touchtype--stats :last-practice-date today)
@@ -527,10 +582,29 @@ Consecutive day: streak + 1.  Gap: streak resets to 1."
                     (time-add (date-to-time (concat last-date " 00:00:00"))
                               (* 24 60 60)))))
       ;; Consecutive day
-      (plist-put touchtype--stats :daily-streak (1+ old-streak)))
+      (plist-put touchtype--stats :daily-streak (1+ old-streak))
+      (setq consec-days (1+ consec-days))
+      (plist-put touchtype--stats :streak-consecutive-days consec-days)
+      ;; Recharge freeze if threshold met
+      (when (and (>= consec-days touchtype-streak-freeze-recharge-days)
+                 (< freezes touchtype-streak-freeze-count))
+        (plist-put touchtype--stats :streak-freezes-available (1+ freezes))
+        (plist-put touchtype--stats :streak-consecutive-days 0)))
      (t
       ;; First day or gap
-      (plist-put touchtype--stats :daily-streak 1)))))
+      (if (and (> freezes 0) (> old-streak 0))
+          (progn
+            ;; Consume a freeze, preserve streak
+            (plist-put touchtype--stats :streak-freezes-available (1- freezes))
+            ;; Don't change the streak number
+            )
+        ;; No freeze: reset
+        (plist-put touchtype--stats :daily-streak 1))
+      (plist-put touchtype--stats :streak-consecutive-days 0)))
+    ;; Update best streak
+    (let ((current (or (plist-get touchtype--stats :daily-streak) 0)))
+      (when (> current best-streak)
+        (plist-put touchtype--stats :streak-best current)))))
 
 (defun touchtype-stats-get-streak ()
   "Return the current daily streak count."
@@ -541,6 +615,16 @@ Consecutive day: streak + 1.  Gap: streak resets to 1."
   "Return total practice time in seconds."
   (unless touchtype--stats (touchtype-stats-load))
   (or (plist-get touchtype--stats :total-practice-time) 0))
+
+(defun touchtype-stats-get-streak-freezes ()
+  "Return the number of available streak freezes."
+  (unless touchtype--stats (touchtype-stats-load))
+  (or (plist-get touchtype--stats :streak-freezes-available) 0))
+
+(defun touchtype-stats-get-best-streak ()
+  "Return the all-time best streak."
+  (unless touchtype--stats (touchtype-stats-load))
+  (or (plist-get touchtype--stats :streak-best) 0))
 
 ;;;; Per-finger statistics
 
@@ -606,8 +690,9 @@ letter-stats by finger using the current layout's finger map."
     (unless (memq id earned)
       (plist-put touchtype--stats :achievements (cons id earned)))))
 
-(defun touchtype-stats-check-achievements (wpm accuracy)
+(defun touchtype-stats-check-achievements (wpm accuracy &optional word-count consistency)
   "Check all achievement conditions given session WPM and ACCURACY.
+WORD-COUNT and CONSISTENCY are optional session metrics.
 Returns list of newly earned achievement IDs."
   (unless touchtype--stats (touchtype-stats-load))
   (let ((earned (touchtype-stats-get-achievements))
@@ -623,25 +708,74 @@ Returns list of newly earned achievement IDs."
       ;; Session milestones
       (award 'first-session)
       (when (>= wpm 30)  (award 'speed-30))
+      (when (>= wpm 40)  (award 'speed-40))
       (when (>= wpm 50)  (award 'speed-50))
+      (when (>= wpm 60)  (award 'speed-60))
       (when (>= wpm 70)  (award 'speed-70))
+      (when (>= wpm 80)  (award 'speed-80))
       (when (>= wpm 100) (award 'speed-100))
+      (when (>= wpm 120) (award 'speed-120))
+      (when (>= wpm 150) (award 'speed-150))
       (when (>= accuracy 95)  (award 'accuracy-95))
       (when (>= accuracy 99)  (award 'accuracy-99))
       (when (>= accuracy 100) (award 'accuracy-100))
       ;; Streak
-      (when (>= streak 7)  (award 'streak-7))
-      (when (>= streak 30) (award 'streak-30))
+      (when (>= streak 7)   (award 'streak-7))
+      (when (>= streak 14)  (award 'streak-14))
+      (when (>= streak 30)  (award 'streak-30))
+      (when (>= streak 60)  (award 'streak-60))
+      (when (>= streak 100) (award 'streak-100))
       ;; Session count (including current)
       (let ((n (length sessions)))
         (when (>= n 10)  (award 'sessions-10))
+        (when (>= n 25)  (award 'sessions-25))
         (when (>= n 50)  (award 'sessions-50))
-        (when (>= n 100) (award 'sessions-100)))
+        (when (>= n 100) (award 'sessions-100))
+        (when (>= n 200) (award 'sessions-200))
+        (when (>= n 500) (award 'sessions-500)))
       ;; All keys unlocked
       (when (>= (length unlocked) 26) (award 'all-keys))
       ;; Practice time
-      (when (>= total-secs 3600)   (award 'practice-1h))
-      (when (>= total-secs 36000)  (award 'practice-10h)))
+      (when (>= total-secs 3600)    (award 'practice-1h))
+      (when (>= total-secs 18000)   (award 'practice-5h))
+      (when (>= total-secs 36000)   (award 'practice-10h))
+      (when (>= total-secs 90000)   (award 'practice-25h))
+      (when (>= total-secs 180000)  (award 'practice-50h))
+      (when (>= total-secs 360000)  (award 'practice-100h))
+      ;; Per-mode session counts
+      (let ((prog-count (cl-count-if (lambda (s) (eq (plist-get (cdr s) :mode) 'progressive))
+                                     sessions))
+            (fw-count (cl-count-if (lambda (s) (eq (plist-get (cdr s) :mode) 'full-words))
+                                   sessions))
+            (code-count (cl-count-if (lambda (s) (eq (plist-get (cdr s) :mode) 'code))
+                                     sessions)))
+        (when (>= prog-count 10) (award 'progressive-10))
+        (when (>= fw-count 10)   (award 'full-words-10))
+        (when (>= code-count 10) (award 'code-10)))
+      ;; Iron Fingers: 5 expert-difficulty sessions
+      (let ((expert-count (cl-count-if
+                           (lambda (s) (eq (plist-get (cdr s) :difficulty) 'expert))
+                           sessions)))
+        (when (>= expert-count 5) (award 'iron-fingers)))
+      ;; Marathon: 120+ word session
+      (when (and word-count (>= word-count 120))
+        (award 'marathon))
+      ;; Consistency King: last 10 sessions all have consistency >= 90
+      (let ((recent (seq-take sessions 10)))
+        (when (and (>= (length recent) 10)
+                   (cl-every (lambda (s)
+                               (let ((c (plist-get (cdr s) :consistency)))
+                                 (and c (>= c 90))))
+                             recent))
+          (award 'consistency-king)))
+      ;; Perfect line (checked via buffer-local flag)
+      (when (and (boundp 'touchtype--perfect-line-achieved)
+                 touchtype--perfect-line-achieved)
+        (award 'perfect-line))
+      ;; Night owl / Early bird
+      (let ((hour (string-to-number (format-time-string "%H"))))
+        (when (= hour 0) (award 'night-owl))
+        (when (and (>= hour 0) (< hour 6)) (award 'early-bird))))
     newly))
 
 ;;;; XP and level system
@@ -667,10 +801,62 @@ Returns list of newly earned achievement IDs."
              and return nil)
     level))
 
-(defun touchtype-stats-xp-for-session (wpm accuracy word-count)
+(defun touchtype-stats-xp-for-session (wpm accuracy word-count &rest context)
   "Compute XP earned for a session with WPM, ACCURACY, and WORD-COUNT.
-Formula: round(WPM * ACCURACY/100 * WORD-COUNT)."
-  (round (* wpm (/ accuracy 100.0) word-count)))
+CONTEXT is an optional plist with keys :streak, :is-pb, :difficulty,
+:consistency, :accuracy-perfect for multiplier calculation.
+Base formula: round(WPM * ACCURACY/100 * WORD-COUNT * total-multiplier)."
+  (let* ((base (round (* wpm (/ accuracy 100.0) word-count)))
+         (total-mult (if (and touchtype-xp-multipliers-enabled context)
+                         (let* ((streak (or (plist-get context :streak) 0))
+                                (is-pb (plist-get context :is-pb))
+                                (difficulty (or (plist-get context :difficulty) 'normal))
+                                (consistency (or (plist-get context :consistency) 0))
+                                (acc-perfect (or (plist-get context :accuracy-perfect)
+                                                 (>= accuracy 100)))
+                                (streak-mult (+ 1.0 (min 0.5 (* streak 0.05))))
+                                (pb-mult (if is-pb 1.5 1.0))
+                                (diff-mult (pcase difficulty
+                                             ('expert 1.5)
+                                             ('master 2.0)
+                                             (_ 1.0)))
+                                (perfect-mult (if acc-perfect 1.25 1.0))
+                                (cons-mult (+ 1.0 (/ (max 0 (- consistency 80)) 100.0))))
+                           (* streak-mult pb-mult diff-mult perfect-mult cons-mult))
+                       1.0)))
+    (round (* base total-mult))))
+
+(defun touchtype-stats-xp-breakdown (wpm accuracy word-count &rest context)
+  "Return plist of XP breakdown for a session.
+Keys: :base, :total-mult, :streak-mult, :pb-mult, :diff-mult,
+:perfect-mult, :cons-mult, :total."
+  (let* ((base (round (* wpm (/ accuracy 100.0) word-count)))
+         (streak (or (plist-get context :streak) 0))
+         (is-pb (plist-get context :is-pb))
+         (difficulty (or (plist-get context :difficulty) 'normal))
+         (consistency (or (plist-get context :consistency) 0))
+         (acc-perfect (or (plist-get context :accuracy-perfect)
+                          (>= accuracy 100)))
+         (streak-mult (if touchtype-xp-multipliers-enabled
+                          (+ 1.0 (min 0.5 (* streak 0.05)))
+                        1.0))
+         (pb-mult (if (and touchtype-xp-multipliers-enabled is-pb) 1.5 1.0))
+         (diff-mult (if touchtype-xp-multipliers-enabled
+                        (pcase difficulty
+                          ('expert 1.5)
+                          ('master 2.0)
+                          (_ 1.0))
+                      1.0))
+         (perfect-mult (if (and touchtype-xp-multipliers-enabled acc-perfect) 1.25 1.0))
+         (cons-mult (if touchtype-xp-multipliers-enabled
+                        (+ 1.0 (/ (max 0 (- consistency 80)) 100.0))
+                      1.0))
+         (total-mult (* streak-mult pb-mult diff-mult perfect-mult cons-mult))
+         (total (round (* base total-mult))))
+    (list :base base :total-mult total-mult
+          :streak-mult streak-mult :pb-mult pb-mult
+          :diff-mult diff-mult :perfect-mult perfect-mult
+          :cons-mult cons-mult :total total)))
 
 (defun touchtype-stats-xp-to-next-level ()
   "Return XP needed to reach the next level, or 0 if at max."

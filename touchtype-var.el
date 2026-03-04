@@ -191,6 +191,51 @@ Set to 0 to disable preview."
   :type 'float
   :group 'touchtype)
 
+(defcustom touchtype-confidence-min-samples 20
+  "Minimum hits before confidence score is fully trusted.
+With fewer hits, confidence is scaled down proportionally."
+  :type 'integer
+  :group 'touchtype)
+
+(defcustom touchtype-xp-multipliers-enabled t
+  "When non-nil, apply streak/PB/difficulty/accuracy multipliers to XP."
+  :type 'boolean
+  :group 'touchtype)
+
+(defcustom touchtype-confidence-ema-alpha 0.15
+  "Smoothing factor for exponential moving average of keystroke times.
+Higher values weight recent keystrokes more heavily (0.0-1.0)."
+  :type 'float
+  :group 'touchtype)
+
+(defcustom touchtype-confidence-use-ema t
+  "When non-nil, use EMA instead of all-time average for confidence scoring."
+  :type 'boolean
+  :group 'touchtype)
+
+(defcustom touchtype-streak-freeze-count 1
+  "Maximum number of streak freezes available.
+A freeze preserves the streak when a day is missed."
+  :type 'integer
+  :group 'touchtype)
+
+(defcustom touchtype-streak-freeze-recharge-days 7
+  "Consecutive practice days needed to recharge one streak freeze."
+  :type 'integer
+  :group 'touchtype)
+
+(defcustom touchtype-graduated-thresholds t
+  "When non-nil, use position-based unlock thresholds instead of a flat value."
+  :type 'boolean
+  :group 'touchtype)
+
+(defcustom touchtype-graduated-threshold-tiers
+  '((6 . 0.70) (12 . 0.80) (18 . 0.85) (26 . 0.80))
+  "Alist of (MAX-POSITION . THRESHOLD) for graduated unlock.
+Keys 1-6: 0.70, 7-12: 0.80, 13-18: 0.85, 19-26: 0.80."
+  :type '(alist :key-type integer :value-type float)
+  :group 'touchtype)
+
 ;;;; Faces
 
 (defface touchtype-face-untyped
@@ -1308,21 +1353,46 @@ Each entry is a cons cell (TEXT . AUTHOR) with proper punctuation.")
 (defconst touchtype--achievements
   '((:id first-session :name "First Steps" :desc "Complete your first typing session")
     (:id speed-30 :name "Warming Up" :desc "Reach 30 WPM in a session")
+    (:id speed-40 :name "Steady Pace" :desc "Reach 40 WPM in a session")
     (:id speed-50 :name "Cruising" :desc "Reach 50 WPM in a session")
+    (:id speed-60 :name "Quick Fingers" :desc "Reach 60 WPM in a session")
     (:id speed-70 :name "Speed Demon" :desc "Reach 70 WPM in a session")
+    (:id speed-80 :name "Velocity" :desc "Reach 80 WPM in a session")
     (:id speed-100 :name "Lightning Fingers" :desc "Reach 100 WPM in a session")
+    (:id speed-120 :name "Supersonic" :desc "Reach 120 WPM in a session")
+    (:id speed-150 :name "Hyperspeed" :desc "Reach 150 WPM in a session")
     (:id accuracy-95 :name "Sharpshooter" :desc "Achieve 95% accuracy in a session")
     (:id accuracy-99 :name "Precision Master" :desc "Achieve 99% accuracy in a session")
     (:id accuracy-100 :name "Perfectionist" :desc "Achieve 100% accuracy in a session")
     (:id streak-7 :name "Week Warrior" :desc "Maintain a 7-day practice streak")
+    (:id streak-14 :name "Fortnight Fighter" :desc "Maintain a 14-day practice streak")
     (:id streak-30 :name "Monthly Master" :desc "Maintain a 30-day practice streak")
+    (:id streak-60 :name "Two Month Titan" :desc "Maintain a 60-day practice streak")
+    (:id streak-100 :name "Century Streak" :desc "Maintain a 100-day practice streak")
     (:id sessions-10 :name "Getting Started" :desc "Complete 10 sessions")
+    (:id sessions-25 :name "Quarter Century" :desc "Complete 25 sessions")
     (:id sessions-50 :name "Dedicated" :desc "Complete 50 sessions")
     (:id sessions-100 :name "Centurion" :desc "Complete 100 sessions")
+    (:id sessions-200 :name "Bicentennial" :desc "Complete 200 sessions")
+    (:id sessions-500 :name "Half Millennium" :desc "Complete 500 sessions")
     (:id all-keys :name "Full Keyboard" :desc "Unlock all 26 keys in progressive mode")
     (:id practice-1h :name "Hour of Power" :desc "Accumulate 1 hour of practice")
-    (:id practice-10h :name "Tenacious" :desc "Accumulate 10 hours of practice"))
-  "List of achievement plists with :id, :name, and :desc.")
+    (:id practice-5h :name "Five Hour Club" :desc "Accumulate 5 hours of practice")
+    (:id practice-10h :name "Tenacious" :desc "Accumulate 10 hours of practice")
+    (:id practice-25h :name "Day of Typing" :desc "Accumulate 25 hours of practice")
+    (:id practice-50h :name "Typing Enthusiast" :desc "Accumulate 50 hours of practice")
+    (:id practice-100h :name "Typing Devotee" :desc "Accumulate 100 hours of practice")
+    (:id progressive-10 :name "Progressive Pro" :desc "Complete 10 progressive sessions")
+    (:id full-words-10 :name "Word Smith" :desc "Complete 10 full-words sessions")
+    (:id code-10 :name "Code Monkey" :desc "Complete 10 code sessions")
+    (:id iron-fingers :name "Iron Fingers" :desc "Complete 5 expert-difficulty sessions")
+    (:id marathon :name "Marathon Runner" :desc "Complete a 120+ word session")
+    (:id consistency-king :name "Consistency King" :desc ">90% consistency for 10 sessions")
+    (:id perfect-line :name "Flawless" :desc "Type a line at >80 WPM with 0 errors" :hidden t)
+    (:id night-owl :name "Night Owl" :desc "Practice after midnight" :hidden t)
+    (:id early-bird :name "Early Bird" :desc "Practice before 6 AM" :hidden t))
+  "List of achievement plists with :id, :name, and :desc.
+Hidden achievements have :hidden t and are not shown until earned.")
 
 ;;;; XP and level thresholds
 
@@ -1362,6 +1432,15 @@ Each entry is a cons cell (TEXT . AUTHOR) with proper punctuation.")
 
 (defvar touchtype--pause-overlay nil
   "Overlay displaying the PAUSED message.")
+
+(defvar touchtype--word-streak 0
+  "Consecutive correctly-typed words in current session.")
+
+(defvar touchtype--best-word-streak 0
+  "Best word streak this session.")
+
+(defvar touchtype--perfect-line-achieved nil
+  "Non-nil if a perfect line was typed this session.")
 
 ;;;; Quote passage state
 

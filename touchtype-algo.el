@@ -755,14 +755,30 @@ Dispatches on `touchtype-keyboard-layout'."
     ('custom  (or touchtype-custom-unlock-order touchtype--qwerty-unlock-order))
     (_        touchtype--qwerty-unlock-order)))
 
+(defun touchtype-algo--graduated-threshold (position)
+  "Return unlock confidence threshold for key at POSITION (1-indexed).
+When `touchtype-graduated-thresholds' is non-nil, looks up the threshold
+from `touchtype-graduated-threshold-tiers'.  Otherwise returns
+`touchtype-unlock-threshold'."
+  (if (not touchtype-graduated-thresholds)
+      touchtype-unlock-threshold
+    (let ((threshold touchtype-unlock-threshold))
+      (cl-loop for (max-pos . thr) in touchtype-graduated-threshold-tiers
+               when (<= position max-pos)
+               do (setq threshold thr) and return nil)
+      threshold)))
+
 (defun touchtype-algo-should-unlock-p ()
   "Return non-nil if all currently unlocked keys meet the confidence threshold.
-Checks every character in `touchtype--unlocked-keys' against
-`touchtype-unlock-threshold'."
-  (cl-every (lambda (ch)
-              (>= (touchtype-stats-get-confidence ch)
-                  touchtype-unlock-threshold))
-            (string-to-list touchtype--unlocked-keys)))
+Checks every character in `touchtype--unlocked-keys' against the
+appropriate threshold (graduated or flat)."
+  (let ((order (touchtype-algo--unlock-order)))
+    (cl-every (lambda (ch)
+                (let* ((pos (1+ (cl-position ch order)))
+                       (threshold (touchtype-algo--graduated-threshold pos)))
+                  (>= (touchtype-stats-get-confidence ch)
+                      threshold)))
+              (string-to-list touchtype--unlocked-keys))))
 
 (defun touchtype-algo-unlock-next-key ()
   "Unlock the next key from the current layout's unlock order.

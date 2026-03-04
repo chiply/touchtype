@@ -1431,7 +1431,7 @@
           (touchtype-stats-save)
           (setq touchtype--stats nil)
           (touchtype-stats-load)
-          (should (= 3 (plist-get touchtype--stats :version)))
+          (should (= 5 (plist-get touchtype--stats :version)))
           ;; Global letter stats preserved
           (let ((entry (assq ?a (plist-get touchtype--stats :letter-stats))))
             (should entry)
@@ -1472,7 +1472,7 @@
                     :confidence nil)
                   (current-buffer))))
           (touchtype-stats-load)
-          (should (= 3 (plist-get touchtype--stats :version)))
+          (should (= 5 (plist-get touchtype--stats :version)))
           (should (plist-member touchtype--stats :mode-letter-stats))
           (should (plist-member touchtype--stats :mode-bigram-stats))
           (should (plist-member touchtype--stats :word-stats))
@@ -2293,7 +2293,7 @@ as focus chars in generated lines."
                     :confidence nil)
                   (current-buffer))))
           (touchtype-stats-load)
-          (should (= 3 (plist-get touchtype--stats :version)))
+          (should (= 5 (plist-get touchtype--stats :version)))
           (should (plist-member touchtype--stats :word-stats))
           ;; Original data preserved
           (let ((entry (assq ?f (plist-get touchtype--stats :letter-stats))))
@@ -2579,6 +2579,564 @@ as focus chars in generated lines."
       (dolist (ch (string-to-list line))
         (should (or (= ch ?\s)
                     (seq-contains-p "therinasd" ch #'=)))))))
+
+;;; ─── Feature G1: Min Sample Size ────────────────────────────────────────────
+
+(ert-deftest touchtype-test-confidence-sample-scaling ()
+  "With 5 hits and perfect stats, confidence is scaled to 0.25 (5/20)."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         (fast-ms (round (/ target-ms 2.0)))
+         (touchtype--stats
+          (list :version 3
+                :letter-stats (list (list ?a :hits 5 :misses 0
+                                          :total-ms (* 5 fast-ms)
+                                          :best-ms fast-ms))
+                :bigram-stats nil :sessions nil
+                :unlocked-keys "fj" :confidence nil))
+         (touchtype-target-wpm 40)
+         (touchtype-confidence-min-samples 20))
+    (should (= 0.25 (touchtype-stats-get-confidence ?a)))))
+
+(ert-deftest touchtype-test-confidence-full-samples ()
+  "With 20+ hits, sample scaling does not reduce confidence."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         (fast-ms (round (/ target-ms 2.0)))
+         (touchtype--stats
+          (list :version 3
+                :letter-stats (list (list ?a :hits 100 :misses 0
+                                          :total-ms (* 100 fast-ms)
+                                          :best-ms fast-ms))
+                :bigram-stats nil :sessions nil
+                :unlocked-keys "fj" :confidence nil))
+         (touchtype-target-wpm 40)
+         (touchtype-confidence-min-samples 20))
+    (should (= 1.0 (touchtype-stats-get-confidence ?a)))))
+
+(ert-deftest touchtype-test-bigram-confidence-sample-scaling ()
+  "Bigram confidence is scaled down with few samples."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         (fast-ms (round (/ target-ms 2.0)))
+         (touchtype--stats
+          (list :version 3 :letter-stats nil
+                :bigram-stats (list (list "th" :hits 10 :misses 0
+                                          :total-ms (* 10 fast-ms)))
+                :sessions nil :unlocked-keys "fj" :confidence nil))
+         (touchtype-target-wpm 40)
+         (touchtype-confidence-min-samples 20))
+    ;; 10/20 = 0.5 scale, so confidence = 1.0 * 1.0 * 0.5 = 0.5
+    (should (= 0.5 (touchtype-stats-get-bigram-confidence "th")))))
+
+(ert-deftest touchtype-test-word-confidence-sample-scaling ()
+  "Word confidence is scaled down with few samples."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         (fast-ms (round (/ target-ms 2.0)))
+         (touchtype--stats
+          (list :version 3 :letter-stats nil :bigram-stats nil
+                :word-stats (list (list "test" :hits 5 :misses 0
+                                        :total-ms (* 5 4 fast-ms)))
+                :sessions nil :unlocked-keys "fj" :confidence nil))
+         (touchtype-target-wpm 40)
+         (touchtype-confidence-min-samples 20))
+    ;; 5/20 = 0.25 scale
+    (should (= 0.25 (touchtype-stats-get-word-confidence "test")))))
+
+;;; ─── Feature G2: Near-Miss Feedback ────────────────────────────────────────
+
+(ert-deftest touchtype-test-near-miss-wpm-close ()
+  "Near-miss detected when WPM is within 5% of PB."
+  (let* ((touchtype--stats
+          (list :version 3 :letter-stats nil :bigram-stats nil
+                :sessions (list (list '2026-01-01 :wpm 50.0 :accuracy 95.0
+                                      :mode 'progressive :words 30))
+                :unlocked-keys "fj" :confidence nil
+                :xp 500 :achievements nil
+                :daily-streak 1 :total-practice-time 100))
+         (touchtype-mode-selection 'progressive))
+    (let ((msgs (touchtype-ui--near-miss-messages
+                 48.5 95.0 100 150 'progressive nil nil)))
+      (should (cl-some (lambda (m) (string-match-p "personal best" m)) msgs)))))
+
+(ert-deftest touchtype-test-near-miss-accuracy ()
+  "Near-miss detected when accuracy is close to achievement threshold."
+  (let* ((touchtype--stats
+          (list :version 3 :letter-stats nil :bigram-stats nil
+                :sessions nil :unlocked-keys "fj" :confidence nil
+                :xp 500 :achievements nil
+                :daily-streak 1 :total-practice-time 100))
+         (touchtype-mode-selection 'progressive))
+    (let ((msgs (touchtype-ui--near-miss-messages
+                 30.0 94.5 100 150 'progressive nil nil)))
+      (should (cl-some (lambda (m) (string-match-p "accuracy" m)) msgs)))))
+
+(ert-deftest touchtype-test-near-miss-xp ()
+  "Near-miss detected when XP is close to next level."
+  (let* ((touchtype--stats
+          (list :version 3 :letter-stats nil :bigram-stats nil
+                :sessions nil :unlocked-keys "fj" :confidence nil
+                :xp 96 :achievements '(accuracy-95 accuracy-99 accuracy-100)
+                :daily-streak 1 :total-practice-time 100))
+         (touchtype-mode-selection 'progressive))
+    (let ((msgs (touchtype-ui--near-miss-messages
+                 30.0 85.0 100 150 'progressive nil nil)))
+      (should (cl-some (lambda (m) (string-match-p "level" m)) msgs)))))
+
+(ert-deftest touchtype-test-near-miss-none ()
+  "No near-miss when all metrics are far from thresholds."
+  (let* ((touchtype--stats
+          (list :version 5 :letter-stats nil :bigram-stats nil
+                :sessions (list (list '2026-01-01 :wpm 80.0 :accuracy 99.0
+                                      :mode 'progressive :words 30))
+                :unlocked-keys "fj" :confidence nil
+                :xp 5 :achievements '(accuracy-95 accuracy-99 accuracy-100
+                                       speed-30 speed-40 speed-50 speed-60
+                                       speed-70 speed-80 speed-100 speed-120
+                                       speed-150)
+                :daily-streak 1 :total-practice-time 100))
+         (touchtype-mode-selection 'progressive))
+    (let ((msgs (touchtype-ui--near-miss-messages
+                 30.0 85.0 5 150 'progressive nil nil)))
+      (should (null msgs)))))
+
+;;; ─── Feature G3: XP Multipliers ────────────────────────────────────────────
+
+(ert-deftest touchtype-test-xp-streak-bonus ()
+  "5-day streak gives 1.25x multiplier."
+  (let ((touchtype-xp-multipliers-enabled t))
+    (let ((base (touchtype-stats-xp-for-session 40.0 95.0 30))
+          (with-streak (touchtype-stats-xp-for-session
+                        40.0 95.0 30
+                        :streak 5)))
+      (should (= with-streak (round (* base 1.25)))))))
+
+(ert-deftest touchtype-test-xp-pb-bonus ()
+  "PB session gives 1.5x multiplier."
+  (let ((touchtype-xp-multipliers-enabled t))
+    (let ((base (touchtype-stats-xp-for-session 40.0 95.0 30))
+          (with-pb (touchtype-stats-xp-for-session
+                    40.0 95.0 30
+                    :is-pb t)))
+      (should (= with-pb (round (* base 1.5)))))))
+
+(ert-deftest touchtype-test-xp-difficulty-bonus ()
+  "Expert gives 1.5x, master gives 2.0x."
+  (let ((touchtype-xp-multipliers-enabled t))
+    (let ((base (touchtype-stats-xp-for-session 40.0 95.0 30))
+          (expert (touchtype-stats-xp-for-session
+                   40.0 95.0 30 :difficulty 'expert))
+          (master (touchtype-stats-xp-for-session
+                   40.0 95.0 30 :difficulty 'master)))
+      (should (= expert (round (* base 1.5))))
+      (should (= master (round (* base 2.0)))))))
+
+(ert-deftest touchtype-test-xp-combined-multipliers ()
+  "Multiple multipliers stack multiplicatively."
+  (let ((touchtype-xp-multipliers-enabled t))
+    (let ((base (touchtype-stats-xp-for-session 40.0 95.0 30))
+          (combined (touchtype-stats-xp-for-session
+                     40.0 95.0 30
+                     :streak 5 :is-pb t)))
+      ;; 1.25 * 1.5 = 1.875
+      (should (= combined (round (* base 1.875)))))))
+
+(ert-deftest touchtype-test-xp-multipliers-disabled ()
+  "With flag nil, old formula applies."
+  (let ((touchtype-xp-multipliers-enabled nil))
+    (let ((result (touchtype-stats-xp-for-session
+                   40.0 95.0 30 :streak 5 :is-pb t)))
+      ;; Same as base: round(40 * 95/100 * 30)
+      (should (= result (round (* 40.0 (/ 95.0 100.0) 30)))))))
+
+;;; ─── Feature G4: Word Streak Counter ───────────────────────────────────────
+
+(ert-deftest touchtype-test-word-streak-increments ()
+  "Correctly typed words increment streak."
+  (let ((touchtype--word-streak 0)
+        (touchtype--best-word-streak 0))
+    (touchtype-ui--update-word-streak t)
+    (should (= 1 touchtype--word-streak))
+    (touchtype-ui--update-word-streak t)
+    (should (= 2 touchtype--word-streak))))
+
+(ert-deftest touchtype-test-word-streak-resets ()
+  "Mistyped word resets streak to 0."
+  (let ((touchtype--word-streak 5)
+        (touchtype--best-word-streak 5))
+    (touchtype-ui--update-word-streak nil)
+    (should (= 0 touchtype--word-streak))))
+
+(ert-deftest touchtype-test-word-streak-best ()
+  "Best streak tracks maximum."
+  (let ((touchtype--word-streak 0)
+        (touchtype--best-word-streak 0))
+    (touchtype-ui--update-word-streak t)
+    (touchtype-ui--update-word-streak t)
+    (touchtype-ui--update-word-streak t)
+    (should (= 3 touchtype--best-word-streak))
+    (touchtype-ui--update-word-streak nil)
+    (should (= 3 touchtype--best-word-streak))
+    (should (= 0 touchtype--word-streak))))
+
+;;; ─── Feature G5: Progress Bar ──────────────────────────────────────────────
+
+(ert-deftest touchtype-test-progress-bar-empty ()
+  "0% progress bar is all empty."
+  (let ((bar (touchtype-ui--progress-bar 0 10)))
+    (should (= 10 (length bar)))
+    (should (string= bar "░░░░░░░░░░"))))
+
+(ert-deftest touchtype-test-progress-bar-full ()
+  "100% progress bar is all filled."
+  (let ((bar (touchtype-ui--progress-bar 100 10)))
+    (should (= 10 (length bar)))
+    (should (string= bar "██████████"))))
+
+(ert-deftest touchtype-test-progress-bar-partial ()
+  "50% progress bar is half filled."
+  (let ((bar (touchtype-ui--progress-bar 50 10)))
+    (should (= 10 (length bar)))
+    (should (string= bar "█████░░░░░"))))
+
+(ert-deftest touchtype-test-unlock-progress-string ()
+  "Unlock progress string shows percentage toward next key."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         (avg-ms (* target-ms (/ 1.0 0.60)))
+         (touchtype--stats
+          (list :version 3
+                :letter-stats (list (list ?f :hits 100 :misses 0
+                                          :total-ms (round (* 100 avg-ms))
+                                          :best-ms (round avg-ms))
+                                    (list ?j :hits 100 :misses 0
+                                          :total-ms (round (* 100 avg-ms))
+                                          :best-ms (round avg-ms)))
+                :bigram-stats nil :sessions nil
+                :unlocked-keys "fj" :confidence nil))
+         (touchtype--unlocked-keys "fj")
+         (touchtype-target-wpm 40)
+         (touchtype-unlock-threshold 0.80)
+         (touchtype-confidence-min-samples 20)
+         (touchtype-graduated-thresholds nil)
+         (touchtype-keyboard-layout 'qwerty)
+         (touchtype-mode-selection 'progressive))
+    (let ((str (touchtype-ui--unlock-progress-string)))
+      (should (stringp str))
+      (should (string-match-p "d" str))
+      (should (string-match-p "%" str)))))
+
+;;; ─── Feature G6: New Achievements ──────────────────────────────────────────
+
+(ert-deftest touchtype-test-achievement-speed-tiers ()
+  "Speed achievements trigger at correct thresholds."
+  (let ((touchtype--stats
+         (list :version 3 :letter-stats nil :bigram-stats nil
+               :sessions (make-list 5 (list '2026-01-01 :wpm 50.0 :accuracy 95.0
+                                            :mode 'progressive :words 30))
+               :unlocked-keys "fj" :confidence nil
+               :achievements nil :daily-streak 1
+               :total-practice-time 100)))
+    (let ((newly (touchtype-stats-check-achievements 120 98.0)))
+      (should (memq 'speed-40 newly))
+      (should (memq 'speed-60 newly))
+      (should (memq 'speed-80 newly))
+      (should (memq 'speed-120 newly))
+      (should-not (memq 'speed-150 newly)))))
+
+(ert-deftest touchtype-test-achievement-sessions-tiers ()
+  "Session count achievements trigger correctly."
+  (let ((touchtype--stats
+         (list :version 3 :letter-stats nil :bigram-stats nil
+               :sessions (make-list 200 (list '2026-01-01 :wpm 40.0 :accuracy 95.0
+                                              :mode 'progressive :words 30))
+               :unlocked-keys "fj" :confidence nil
+               :achievements nil :daily-streak 1
+               :total-practice-time 100)))
+    (let ((newly (touchtype-stats-check-achievements 40 95.0)))
+      (should (memq 'sessions-25 newly))
+      (should (memq 'sessions-200 newly))
+      (should-not (memq 'sessions-500 newly)))))
+
+(ert-deftest touchtype-test-achievement-streak-tiers ()
+  "Streak achievements trigger at correct thresholds."
+  (let ((touchtype--stats
+         (list :version 3 :letter-stats nil :bigram-stats nil
+               :sessions (make-list 5 (list '2026-01-01 :wpm 40.0 :accuracy 95.0
+                                            :mode 'progressive :words 30))
+               :unlocked-keys "fj" :confidence nil
+               :achievements nil :daily-streak 60
+               :total-practice-time 100)))
+    (let ((newly (touchtype-stats-check-achievements 40 95.0)))
+      (should (memq 'streak-14 newly))
+      (should (memq 'streak-60 newly))
+      (should-not (memq 'streak-100 newly)))))
+
+(ert-deftest touchtype-test-achievement-practice-time-tiers ()
+  "Practice time achievements trigger correctly."
+  (let ((touchtype--stats
+         (list :version 3 :letter-stats nil :bigram-stats nil
+               :sessions (make-list 5 (list '2026-01-01 :wpm 40.0 :accuracy 95.0
+                                            :mode 'progressive :words 30))
+               :unlocked-keys "fj" :confidence nil
+               :achievements nil :daily-streak 1
+               :total-practice-time (* 25 3600))))
+    (let ((newly (touchtype-stats-check-achievements 40 95.0)))
+      (should (memq 'practice-5h newly))
+      (should (memq 'practice-25h newly))
+      (should-not (memq 'practice-50h newly)))))
+
+(ert-deftest touchtype-test-achievement-marathon ()
+  "Marathon achievement triggers with 120+ word count."
+  (let ((touchtype--stats
+         (list :version 3 :letter-stats nil :bigram-stats nil
+               :sessions (make-list 5 (list '2026-01-01 :wpm 40.0 :accuracy 95.0
+                                            :mode 'progressive :words 30))
+               :unlocked-keys "fj" :confidence nil
+               :achievements nil :daily-streak 1
+               :total-practice-time 100)))
+    (let ((newly (touchtype-stats-check-achievements 40 95.0 120)))
+      (should (memq 'marathon newly)))))
+
+(ert-deftest touchtype-test-achievement-hidden-not-shown ()
+  "Hidden achievements have :hidden t property."
+  (let ((hidden-ids '(perfect-line night-owl early-bird)))
+    (dolist (id hidden-ids)
+      (let ((ach (cl-find id touchtype--achievements
+                          :key (lambda (a) (plist-get a :id)))))
+        (should ach)
+        (should (plist-get ach :hidden))))))
+
+;;; ─── Feature G7: EMA Confidence ────────────────────────────────────────────
+
+(ert-deftest touchtype-test-ema-update ()
+  "EMA converges toward recent values."
+  (let ((touchtype--stats
+         (list :version 5
+               :letter-stats (list (list ?a :hits 0 :misses 0
+                                         :total-ms 0 :best-ms nil :ema-ms nil))
+               :bigram-stats nil :sessions nil
+               :unlocked-keys "fj" :confidence nil))
+        (touchtype-confidence-use-ema t)
+        (touchtype-confidence-ema-alpha 0.15))
+    ;; Record several keypresses at 200ms
+    (dotimes (_ 50)
+      (touchtype-stats-record-keypress ?a t 200))
+    (let* ((entry (assq ?a (plist-get touchtype--stats :letter-stats)))
+           (ema (touchtype-stats--entry-get entry :ema-ms)))
+      (should ema)
+      ;; After 50 hits at 200ms, EMA should be close to 200
+      (should (< (abs (- ema 200.0)) 10.0)))))
+
+(ert-deftest touchtype-test-ema-confidence-uses-ema ()
+  "With EMA enabled, confidence uses EMA instead of all-time average."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         (fast-ms (round (/ target-ms 2.0)))
+         (touchtype--stats
+          (list :version 5
+                :letter-stats (list (list ?a :hits 100 :misses 0
+                                          :total-ms (* 100 (round (* target-ms 3)))
+                                          :best-ms fast-ms
+                                          :ema-ms (float fast-ms)))
+                :bigram-stats nil :sessions nil
+                :unlocked-keys "fj" :confidence nil))
+         (touchtype-target-wpm 40)
+         (touchtype-confidence-use-ema t)
+         (touchtype-confidence-min-samples 20))
+    ;; All-time avg is slow (3x target), but EMA is fast (0.5x target)
+    ;; With EMA: speed-conf = 1.0 (target/fast > 1), accuracy = 1.0, sample = 1.0
+    (should (= 1.0 (touchtype-stats-get-confidence ?a)))))
+
+(ert-deftest touchtype-test-ema-disabled-fallback ()
+  "With EMA disabled, confidence uses all-time average."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         (fast-ms (round (/ target-ms 2.0)))
+         (touchtype--stats
+          (list :version 5
+                :letter-stats (list (list ?a :hits 100 :misses 0
+                                          :total-ms (* 100 (round (* target-ms 3)))
+                                          :best-ms fast-ms
+                                          :ema-ms (float fast-ms)))
+                :bigram-stats nil :sessions nil
+                :unlocked-keys "fj" :confidence nil))
+         (touchtype-target-wpm 40)
+         (touchtype-confidence-use-ema nil)
+         (touchtype-confidence-min-samples 20))
+    ;; All-time avg is 3x target, so speed-conf = 1/3
+    (let ((conf (touchtype-stats-get-confidence ?a)))
+      (should (< conf 0.5)))))
+
+(ert-deftest touchtype-test-ema-migration ()
+  "V3 stats migrated to v5 get :ema-ms seeded from all-time average."
+  (let* ((tmp (make-temp-file "touchtype-ema-test" nil ".el"))
+         (touchtype-stats-file tmp)
+         (touchtype-streak-freeze-count 1))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp
+            (let ((print-level nil) (print-length nil))
+              (pp '(touchtype-stats
+                    :version 3
+                    :letter-stats ((?a :hits 100 :misses 5 :total-ms 30000 :best-ms 200))
+                    :bigram-stats (("th" :hits 50 :misses 2 :total-ms 15000))
+                    :mode-letter-stats nil :mode-bigram-stats nil
+                    :word-stats nil
+                    :sessions nil :unlocked-keys "fj" :confidence nil)
+                  (current-buffer))))
+          (setq touchtype--stats nil)
+          (touchtype-stats-load)
+          (should (= 5 (plist-get touchtype--stats :version)))
+          ;; Letter EMA seeded
+          (let ((entry (assq ?a (plist-get touchtype--stats :letter-stats))))
+            (should (touchtype-stats--entry-get entry :ema-ms))
+            (should (= 300.0 (touchtype-stats--entry-get entry :ema-ms))))
+          ;; Bigram EMA seeded
+          (let ((entry (assoc "th" (plist-get touchtype--stats :bigram-stats))))
+            (should (touchtype-stats--entry-get entry :ema-ms))
+            (should (= 300.0 (touchtype-stats--entry-get entry :ema-ms)))))
+      (delete-file tmp))))
+
+;;; ─── Feature G8: Streak Freeze ─────────────────────────────────────────────
+
+(ert-deftest touchtype-test-streak-freeze-consumed ()
+  "Gap with freeze available preserves streak."
+  (let ((touchtype--stats
+         (list :version 5 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil
+               :daily-streak 10 :last-practice-date "2020-01-01"
+               :total-practice-time 1000
+               :streak-freezes-available 1
+               :streak-best 10
+               :streak-consecutive-days 0))
+        (touchtype-streak-freeze-count 1)
+        (touchtype-streak-freeze-recharge-days 7))
+    (touchtype-stats-update-streak-and-time 60.0)
+    (should (= 10 (plist-get touchtype--stats :daily-streak)))
+    (should (= 0 (plist-get touchtype--stats :streak-freezes-available)))))
+
+(ert-deftest touchtype-test-streak-freeze-exhausted ()
+  "Gap with 0 freezes resets streak."
+  (let ((touchtype--stats
+         (list :version 5 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil
+               :daily-streak 10 :last-practice-date "2020-01-01"
+               :total-practice-time 1000
+               :streak-freezes-available 0
+               :streak-best 10
+               :streak-consecutive-days 0))
+        (touchtype-streak-freeze-count 1)
+        (touchtype-streak-freeze-recharge-days 7))
+    (touchtype-stats-update-streak-and-time 60.0)
+    (should (= 1 (plist-get touchtype--stats :daily-streak)))))
+
+(ert-deftest touchtype-test-streak-freeze-recharge ()
+  "7 consecutive practice days recharges a freeze."
+  (let* ((today (format-time-string "%Y-%m-%d"))
+         (yesterday (format-time-string "%Y-%m-%d"
+                      (time-subtract (current-time) (* 24 60 60))))
+         (touchtype--stats
+          (list :version 5 :letter-stats nil :bigram-stats nil
+                :sessions nil :unlocked-keys "fj" :confidence nil
+                :daily-streak 7 :last-practice-date yesterday
+                :total-practice-time 1000
+                :streak-freezes-available 0
+                :streak-best 7
+                :streak-consecutive-days 6))
+         (touchtype-streak-freeze-count 1)
+         (touchtype-streak-freeze-recharge-days 7))
+    (touchtype-stats-update-streak-and-time 60.0)
+    ;; streak-consecutive-days was 6, now 7 -> triggers recharge
+    (should (= 1 (plist-get touchtype--stats :streak-freezes-available)))
+    (should (= 0 (plist-get touchtype--stats :streak-consecutive-days)))))
+
+(ert-deftest touchtype-test-streak-best-tracked ()
+  "Best streak updates on new highs."
+  (let* ((today (format-time-string "%Y-%m-%d"))
+         (yesterday (format-time-string "%Y-%m-%d"
+                      (time-subtract (current-time) (* 24 60 60))))
+         (touchtype--stats
+          (list :version 5 :letter-stats nil :bigram-stats nil
+                :sessions nil :unlocked-keys "fj" :confidence nil
+                :daily-streak 15 :last-practice-date yesterday
+                :total-practice-time 1000
+                :streak-freezes-available 1
+                :streak-best 10
+                :streak-consecutive-days 3))
+         (touchtype-streak-freeze-count 1)
+         (touchtype-streak-freeze-recharge-days 7))
+    (touchtype-stats-update-streak-and-time 60.0)
+    (should (= 16 (plist-get touchtype--stats :streak-best)))))
+
+;;; ─── Feature G9: Graduated Thresholds ──────────────────────────────────────
+
+(ert-deftest touchtype-test-graduated-threshold-values ()
+  "Graduated thresholds return correct values for each tier."
+  (let ((touchtype-graduated-thresholds t)
+        (touchtype-graduated-threshold-tiers
+         '((6 . 0.70) (12 . 0.80) (18 . 0.85) (26 . 0.80))))
+    (should (= 0.70 (touchtype-algo--graduated-threshold 1)))
+    (should (= 0.70 (touchtype-algo--graduated-threshold 6)))
+    (should (= 0.80 (touchtype-algo--graduated-threshold 7)))
+    (should (= 0.80 (touchtype-algo--graduated-threshold 12)))
+    (should (= 0.85 (touchtype-algo--graduated-threshold 13)))
+    (should (= 0.80 (touchtype-algo--graduated-threshold 26)))))
+
+(ert-deftest touchtype-test-graduated-disabled ()
+  "With flag nil, flat threshold is used."
+  (let* ((touchtype-graduated-thresholds nil)
+         (touchtype-unlock-threshold 0.80))
+    (should (= 0.80 (touchtype-algo--graduated-threshold 1)))
+    (should (= 0.80 (touchtype-algo--graduated-threshold 15)))))
+
+(ert-deftest touchtype-test-graduated-unlock-easier-early ()
+  "Early keys unlock at 0.70 threshold (would fail at 0.80)."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         ;; Create keys with 0.72 confidence: accuracy=1.0, speed=0.72
+         ;; speed-conf = target-ms / avg-ms, so avg-ms = target-ms / 0.72
+         (avg-ms (/ target-ms 0.72))
+         (touchtype--stats
+          (list :version 5
+                :letter-stats (list (list ?f :hits 100 :misses 0
+                                          :total-ms (round (* 100 avg-ms))
+                                          :best-ms (round avg-ms))
+                                    (list ?j :hits 100 :misses 0
+                                          :total-ms (round (* 100 avg-ms))
+                                          :best-ms (round avg-ms)))
+                :bigram-stats nil :sessions nil
+                :unlocked-keys "fj" :confidence nil))
+         (touchtype--unlocked-keys "fj")
+         (touchtype-target-wpm 40)
+         (touchtype-unlock-threshold 0.80)
+         (touchtype-confidence-min-samples 20)
+         (touchtype-graduated-thresholds t)
+         (touchtype-graduated-threshold-tiers
+          '((6 . 0.70) (12 . 0.80) (18 . 0.85) (26 . 0.80)))
+         (touchtype-keyboard-layout 'qwerty))
+    ;; With graduated: threshold for keys 1-2 is 0.70, and conf = 0.72 > 0.70
+    (should (touchtype-algo-should-unlock-p))
+    ;; Without graduated: threshold is 0.80, and conf = 0.72 < 0.80
+    (let ((touchtype-graduated-thresholds nil))
+      (should-not (touchtype-algo-should-unlock-p)))))
+
+;;; ─── Feature G10: Level-Up Celebration ─────────────────────────────────────
+
+(ert-deftest touchtype-test-xp-progress-bar-mid ()
+  "XP progress bar shows correct percentage mid-level."
+  (let ((touchtype--stats
+         (list :version 5 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil
+               :xp 150)))
+    ;; Level 1 starts at 100, level 2 at 250. XP=150 -> 50/150 = 33%
+    (let ((bar (touchtype-ui--xp-progress-bar)))
+      (should (stringp bar))
+      (should (string-match-p "33%" bar))
+      (should (string-match-p "Level 2" bar)))))
+
+(ert-deftest touchtype-test-xp-progress-bar-max ()
+  "XP progress bar shows MAX LEVEL at max level."
+  (let ((touchtype--stats
+         (list :version 5 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fj" :confidence nil
+               :xp 100000)))
+    (let ((bar (touchtype-ui--xp-progress-bar)))
+      (should (stringp bar))
+      (should (string-match-p "MAX" bar)))))
 
 (provide 'touchtype-test)
 
