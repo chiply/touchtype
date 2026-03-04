@@ -293,13 +293,23 @@ With prefix ARG, set session length to that number of words."
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
-(defun touchtype-weak-bigrams (&optional arg)
+(defun touchtype-weak-ngrams (&optional arg)
   "Start a touchtype session drilling your weakest n-grams.
 With prefix ARG, set session length to that number of words."
   (interactive "P")
   (touchtype--apply-prefix-arg arg)
   (setq touchtype-session-type 'words)
-  (setq touchtype-mode-selection 'weak-bigrams)
+  (setq touchtype-mode-selection 'weak-ngrams)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-weak-words (&optional arg)
+  "Start a touchtype session focusing on your weakest words.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'weak-words)
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
@@ -387,6 +397,78 @@ With prefix ARG, set session length to that number of words."
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload
+(defun touchtype-finger-drill (finger &optional arg)
+  "Start a touchtype session drilling keys for FINGER.
+FINGER is a symbol like `left-pinky', `right-index', etc.
+With prefix ARG, set session length to that number of words."
+  (interactive
+   (list (intern (completing-read "Finger: "
+                                  (mapcar #'car touchtype--finger-names)
+                                  nil t))
+         current-prefix-arg))
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype--finger-selection finger)
+  (setq touchtype-session-type 'words)
+  (setq touchtype-mode-selection 'finger-drill)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
+(defun touchtype-left-pinky (&optional arg)
+  "Start a touchtype session drilling left pinky keys.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype-finger-drill 'left-pinky arg))
+
+;;;###autoload
+(defun touchtype-left-ring (&optional arg)
+  "Start a touchtype session drilling left ring finger keys.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype-finger-drill 'left-ring arg))
+
+;;;###autoload
+(defun touchtype-left-middle (&optional arg)
+  "Start a touchtype session drilling left middle finger keys.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype-finger-drill 'left-middle arg))
+
+;;;###autoload
+(defun touchtype-left-index (&optional arg)
+  "Start a touchtype session drilling left index finger keys.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype-finger-drill 'left-index arg))
+
+;;;###autoload
+(defun touchtype-right-index (&optional arg)
+  "Start a touchtype session drilling right index finger keys.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype-finger-drill 'right-index arg))
+
+;;;###autoload
+(defun touchtype-right-middle (&optional arg)
+  "Start a touchtype session drilling right middle finger keys.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype-finger-drill 'right-middle arg))
+
+;;;###autoload
+(defun touchtype-right-ring (&optional arg)
+  "Start a touchtype session drilling right ring finger keys.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype-finger-drill 'right-ring arg))
+
+;;;###autoload
+(defun touchtype-right-pinky (&optional arg)
+  "Start a touchtype session drilling right pinky keys.
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype-finger-drill 'right-pinky arg))
+
+;;;###autoload
 (defun touchtype-symbol-drill (&optional arg)
   "Start a touchtype session drilling programming symbols.
 With prefix ARG, set session length to that number of words."
@@ -423,11 +505,11 @@ With prefix ARG, set session length to that number of words."
 
 ;;;###autoload
 (defun touchtype-code-language (language)
-  "Start a touchtype session with code snippets from LANGUAGE.
+  "Start a touchtype session with code blocks from LANGUAGE.
 LANGUAGE is a symbol like `python', `rust', `go', etc."
   (interactive
    (list (intern (completing-read "Language: "
-                                  (mapcar #'car touchtype--code-snippets-by-language)
+                                  (mapcar #'car touchtype--code-blocks-by-language)
                                   nil t))))
   (setq touchtype--code-language language)
   (setq touchtype-session-type 'words)

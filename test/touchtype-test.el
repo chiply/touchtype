@@ -803,7 +803,7 @@
 (ert-deftest touchtype-test-tab-bound-in-keymap ()
   "TAB is bound in the training keymap."
   (let ((map (touchtype-ui--make-keymap)))
-    (should (eq (lookup-key map (kbd "TAB")) #'touchtype-ui--quick-restart))))
+    (should (eq (lookup-key map (kbd "TAB")) #'touchtype-ui--handle-tab))))
 
 (ert-deftest touchtype-test-quick-restart-resets-counters ()
   "Quick restart resets session counters."
@@ -1018,8 +1018,10 @@
 ;;; ─── Feature 9: Code Mode ─────────────────────────────────────────────────
 
 (ert-deftest touchtype-test-code-line-non-empty ()
-  "Code mode generates a non-empty line."
+  "Code mode generates a non-empty line from block lines."
   (let ((touchtype-mode-selection 'code)
+        (touchtype--code-language nil)
+        (touchtype--code-block-lines nil)
         (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz")
         (touchtype--focused-key nil))
     (let ((line (touchtype-algo-generate-line)))
@@ -1034,11 +1036,44 @@
       (should (seq-contains-p allowed ?{ #'=))
       (should (seq-contains-p allowed ?~ #'=)))))
 
-(ert-deftest touchtype-test-code-snippets-all-printable ()
-  "All code snippet chars are printable ASCII."
-  (cl-loop for s across touchtype--code-snippets
-           do (cl-loop for c across s
-                       do (should (and (>= c 32) (<= c 126))))))
+(ert-deftest touchtype-test-code-blocks-are-strings ()
+  "Every entry in every language is a string."
+  (dolist (pair touchtype--code-blocks-by-language)
+    (cl-loop for block across (cdr pair)
+             do (should (stringp block)))))
+
+(ert-deftest touchtype-test-code-blocks-have-content ()
+  "Every block produces at least 2 non-empty lines when split."
+  (cl-loop for block across touchtype--code-blocks
+           do (let ((lines (cl-remove-if #'string-empty-p
+                                         (split-string block "\n"))))
+                (should (>= (length lines) 2)))))
+
+(ert-deftest touchtype-test-code-block-line-generation ()
+  "Lines come from block content and preserve indentation."
+  (let ((touchtype-mode-selection 'code)
+        (touchtype--code-language 'python)
+        (touchtype--code-block-lines nil))
+    (let ((line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      ;; Should be a single line from a Python block
+      (should-not (string-match-p "\n" line)))))
+
+(ert-deftest touchtype-test-code-block-exhaustion ()
+  "New block is prepared when lines run out."
+  (let ((touchtype-mode-selection 'code)
+        (touchtype--code-language nil)
+        (touchtype--code-block-lines nil))
+    ;; First call prepares a block and pops a line
+    (let ((line1 (touchtype-algo-generate-line)))
+      (should (stringp line1)))
+    ;; Exhaust remaining lines
+    (while touchtype--code-block-lines
+      (touchtype-algo-generate-line))
+    ;; Next call should prepare a new block automatically
+    (let ((line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (should (> (length line) 0)))))
 
 ;;; ─── Feature 1: Timed Mode ────────────────────────────────────────────────
 
@@ -1396,7 +1431,7 @@
           (touchtype-stats-save)
           (setq touchtype--stats nil)
           (touchtype-stats-load)
-          (should (= 2 (plist-get touchtype--stats :version)))
+          (should (= 3 (plist-get touchtype--stats :version)))
           ;; Global letter stats preserved
           (let ((entry (assq ?a (plist-get touchtype--stats :letter-stats))))
             (should entry)
@@ -1412,7 +1447,9 @@
                                    (plist-get touchtype--stats :mode-bigram-stats)))
                  (mentry (assoc "ab" (cdr mode-alist))))
             (should mentry)
-            (should (= 3 (touchtype-stats--entry-get mentry :hits)))))
+            (should (= 3 (touchtype-stats--entry-get mentry :hits))))
+          ;; word-stats key added by migration
+          (should (plist-member touchtype--stats :word-stats)))
       (delete-file tmp))))
 
 (ert-deftest touchtype-test-v1-to-v2-migration ()
@@ -1435,9 +1472,10 @@
                     :confidence nil)
                   (current-buffer))))
           (touchtype-stats-load)
-          (should (= 2 (plist-get touchtype--stats :version)))
+          (should (= 3 (plist-get touchtype--stats :version)))
           (should (plist-member touchtype--stats :mode-letter-stats))
           (should (plist-member touchtype--stats :mode-bigram-stats))
+          (should (plist-member touchtype--stats :word-stats))
           ;; Original data preserved
           (let ((entry (assq ?f (plist-get touchtype--stats :letter-stats))))
             (should entry)
@@ -1562,8 +1600,8 @@
       (should (stringp line))
       (should (> (length line) 10)))))
 
-(ert-deftest touchtype-test-weak-bigrams-line-cold-start ()
-  "Weak bigrams line should fall back to bigram drill with no stats."
+(ert-deftest touchtype-test-weak-ngrams-line-cold-start ()
+  "Weak ngrams line should fall back to bigram drill with no stats."
   (let ((touchtype--stats
          (list :version 1 :letter-stats nil :bigram-stats nil
                :sessions nil :unlocked-keys "abcdefghijklmnopqrstuvwxyz" :confidence nil))
@@ -1571,12 +1609,12 @@
         (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz")
         (touchtype-word-length-min 4)
         (touchtype-word-length-max 8))
-    (let ((line (touchtype-algo--weak-bigrams-line)))
+    (let ((line (touchtype-algo--weak-ngrams-line)))
       (should (stringp line))
       (should (> (length line) 0)))))
 
-(ert-deftest touchtype-test-weak-bigrams-line-with-stats ()
-  "Weak bigrams line should generate text with stats present."
+(ert-deftest touchtype-test-weak-ngrams-line-with-stats ()
+  "Weak ngrams line should generate text with stats present."
   (let ((touchtype--stats
          (list :version 1
                :letter-stats nil
@@ -1587,7 +1625,7 @@
         (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz")
         (touchtype-word-length-min 4)
         (touchtype-word-length-max 8))
-    (let ((line (touchtype-algo--weak-bigrams-line)))
+    (let ((line (touchtype-algo--weak-ngrams-line)))
       (should (stringp line))
       (should (> (length line) 10)))))
 
@@ -1639,7 +1677,7 @@ as focus chars in generated lines."
   "All weak modes should return full alphabet for allowed chars."
   (let ((touchtype-mode-selection 'weak-letters))
     (should (equal (touchtype-algo--allowed-for-mode) "abcdefghijklmnopqrstuvwxyz")))
-  (let ((touchtype-mode-selection 'weak-bigrams))
+  (let ((touchtype-mode-selection 'weak-ngrams))
     (should (equal (touchtype-algo--allowed-for-mode) "abcdefghijklmnopqrstuvwxyz")))
   (let ((touchtype-mode-selection 'weak-mixed))
     (should (equal (touchtype-algo--allowed-for-mode) "abcdefghijklmnopqrstuvwxyz"))))
@@ -1648,7 +1686,7 @@ as focus chars in generated lines."
 
 (ert-deftest touchtype-test-quote-line-generation ()
   "Quote mode should generate non-empty lines from a quote passage."
-  (let ((touchtype--quote-passage "the only way to do great work is to love what you do")
+  (let ((touchtype--quote-passage "\"The only way to do great work is to love what you do.\" - Steve Jobs")
         (touchtype--quote-offset 0)
         (touchtype-mode-selection 'quote))
     (let ((line (touchtype-algo--generate-line-from-passage
@@ -1657,13 +1695,15 @@ as focus chars in generated lines."
       (should (> (length line) 0)))))
 
 (ert-deftest touchtype-test-quote-prepare ()
-  "Preparing a quote should set passage and offset."
+  "Preparing a quote should set a formatted passage with quotes and attribution."
   (let ((touchtype--quote-passage nil)
         (touchtype--quote-offset 0))
     (touchtype-algo--prepare-quote)
     (should (stringp touchtype--quote-passage))
     (should (> (length touchtype--quote-passage) 0))
-    (should (= touchtype--quote-offset 0))))
+    (should (= touchtype--quote-offset 0))
+    (should (string-prefix-p "\"" touchtype--quote-passage))
+    (should (string-match-p " - " touchtype--quote-passage))))
 
 (ert-deftest touchtype-test-domain-words-medical ()
   "Domain words for medical should generate a line of medical terms."
@@ -1761,18 +1801,17 @@ as focus chars in generated lines."
 
 ;;; ─── Phase 3: Symbol drill & language code tests ─────────────────────────────
 
-(ert-deftest touchtype-test-code-snippets-by-language-keys ()
+(ert-deftest touchtype-test-code-blocks-by-language-keys ()
   "All expected languages should be present in the by-language alist."
   (dolist (lang '(python rust go javascript elisp bash sql c))
-    (should (assq lang touchtype--code-snippets-by-language))))
+    (should (assq lang touchtype--code-blocks-by-language))))
 
-(ert-deftest touchtype-test-code-snippets-backward-compat ()
-  "Flat code-snippets vector should contain snippets from all languages."
-  (should (> (length touchtype--code-snippets) 50))
-  ;; Should contain snippets from multiple languages
+(ert-deftest touchtype-test-code-blocks-all-languages ()
+  "Flat code-blocks vector should contain blocks from all languages."
+  (should (> (length touchtype--code-blocks) 30))
   (let ((has-python nil) (has-rust nil) (has-sql nil))
-    (dotimes (i (length touchtype--code-snippets))
-      (let ((s (aref touchtype--code-snippets i)))
+    (dotimes (i (length touchtype--code-blocks))
+      (let ((s (aref touchtype--code-blocks i)))
         (when (string-match-p "def " s) (setq has-python t))
         (when (string-match-p "fn " s) (setq has-rust t))
         (when (string-match-p "SELECT" s) (setq has-sql t))))
@@ -1781,20 +1820,59 @@ as focus chars in generated lines."
     (should has-sql)))
 
 (ert-deftest touchtype-test-code-language-filter ()
-  "Code mode with language filter should only produce snippets from that language."
+  "Code mode with language filter uses that language's blocks."
   (let ((touchtype-mode-selection 'code)
-        (touchtype--code-language 'python))
+        (touchtype--code-language 'python)
+        (touchtype--code-block-lines nil))
     (let ((line (touchtype-algo-generate-line)))
       (should (stringp line))
       (should (> (length line) 0)))))
 
 (ert-deftest touchtype-test-code-language-nil-uses-all ()
-  "Code mode with nil language should use all snippets."
+  "Code mode with nil language uses all blocks."
   (let ((touchtype-mode-selection 'code)
-        (touchtype--code-language nil))
+        (touchtype--code-language nil)
+        (touchtype--code-block-lines nil))
     (let ((line (touchtype-algo-generate-line)))
       (should (stringp line))
       (should (> (length line) 0)))))
+
+(ert-deftest touchtype-test-at-leading-whitespace-p ()
+  "Detect cursor at leading whitespace vs mid-word."
+  (let ((touchtype--current-text "    hello")
+        (touchtype--cursor-pos 0))
+    (should (touchtype-ui--at-leading-whitespace-p)))
+  (let ((touchtype--current-text "    hello")
+        (touchtype--cursor-pos 2))
+    (should (touchtype-ui--at-leading-whitespace-p)))
+  ;; At the 'h' character -- not whitespace
+  (let ((touchtype--current-text "    hello")
+        (touchtype--cursor-pos 4))
+    (should-not (touchtype-ui--at-leading-whitespace-p)))
+  ;; No leading whitespace
+  (let ((touchtype--current-text "hello")
+        (touchtype--cursor-pos 0))
+    (should-not (touchtype-ui--at-leading-whitespace-p))))
+
+(ert-deftest touchtype-test-tab-fills-indentation-in-code-mode ()
+  "TAB in code mode at leading whitespace advances through spaces."
+  (let ((touchtype-mode-selection 'code)
+        (touchtype--current-text "    hello")
+        (touchtype--cursor-pos 0)
+        (chars-processed nil))
+    ;; Mock process-char to just advance cursor and track calls
+    (cl-letf (((symbol-function 'touchtype-ui--process-char)
+               (lambda (ch)
+                 (push ch chars-processed)
+                 (cl-incf touchtype--cursor-pos))))
+      ;; Should be at leading whitespace
+      (should (touchtype-ui--at-leading-whitespace-p))
+      ;; Fill indentation should advance past the 4 spaces
+      (touchtype-ui--fill-indentation)
+      (should (= touchtype--cursor-pos 4))
+      ;; Should have processed exactly 4 space characters
+      (should (= (length chars-processed) 4))
+      (should (cl-every (lambda (c) (= c ?\s)) chars-processed)))))
 
 (ert-deftest touchtype-test-programming-bigrams-populated ()
   "Programming bigrams list should have entries."
@@ -2071,6 +2149,436 @@ as focus chars in generated lines."
         (touchtype-difficulty 'normal))
     (let ((status (touchtype-ui--status-string)))
       (should-not (string-match-p "\\[normal\\]" status)))))
+
+;;; ─── Fix 3: Unlock order validation ─────────────────────────────────────────
+
+(ert-deftest touchtype-test-unlock-orders-lowercase-26 ()
+  "All unlock order strings are fully lowercase and contain exactly 26 unique letters."
+  (dolist (order (list touchtype--qwerty-unlock-order
+                       touchtype--dvorak-unlock-order
+                       touchtype--colemak-unlock-order
+                       touchtype--workman-unlock-order))
+    ;; All lowercase
+    (should (string-match-p "\\`[a-z]+\\'" order))
+    ;; Exactly 26 characters
+    (should (= 26 (length order)))
+    ;; All unique
+    (should (= 26 (length (delete-dups (string-to-list (copy-sequence order))))))))
+
+;;; ─── Fix 4: ngram-drill mixed sizes ────────────────────────────────────────
+
+(ert-deftest touchtype-test-ngram-drill-mixed-sizes ()
+  "ngram-drill lines contain 2-char, 3-char, and 4-char tokens."
+  (let ((touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz")
+        (touchtype--focused-key nil)
+        (touchtype-mode-selection 'ngram-drill)
+        (found-2 nil) (found-3 nil) (found-4 nil))
+    (dotimes (_ 20)
+      (let* ((line (touchtype-algo-generate-line))
+             (parts (split-string line " " t)))
+        (dolist (part parts)
+          (pcase (length part)
+            (2 (setq found-2 t))
+            (3 (setq found-3 t))
+            (4 (setq found-4 t))))))
+    (should found-2)
+    (should found-3)
+    (should found-4)))
+
+;;; ─── Fix 5: Bigrams included in weak-ngrams ────────────────────────────────
+
+(ert-deftest touchtype-test-weak-ngrams-includes-bigrams ()
+  "get-weak-ngrams with min-len 2 includes bigrams."
+  (let* ((target-ms (/ 60000.0 (* 40 5)))
+         (touchtype--stats
+          (list :version 3 :letter-stats nil
+                :bigram-stats
+                (list (list "th" :hits 10 :misses 2
+                            :total-ms (round (* 10 target-ms)))
+                      (list "the" :hits 10 :misses 3
+                            :total-ms (round (* 10 (* target-ms 2))))
+                      (list "that" :hits 10 :misses 1
+                            :total-ms (round (* 10 target-ms))))
+                :sessions nil :unlocked-keys "fj" :confidence nil
+                :word-stats nil))
+         (touchtype-target-wpm 40))
+    ;; Range 2-4 should include the bigram "th"
+    (let* ((all (touchtype-stats-get-weak-ngrams 2 4 10))
+           (keys (mapcar #'car all)))
+      (should (= 3 (length all)))
+      (should (member "th" keys)))))
+
+;;; ─── Fix 1: Weak-words mode ────────────────────────────────────────────────
+
+(ert-deftest touchtype-test-word-recording ()
+  "Record-word correctly increments hits and total-ms."
+  (let ((touchtype--stats
+         (list :version 3 :letter-stats nil :bigram-stats nil
+               :mode-letter-stats nil :mode-bigram-stats nil
+               :word-stats nil :sessions nil :unlocked-keys "fj"
+               :confidence nil)))
+    (touchtype-stats-record-word "hello" t 500)
+    (touchtype-stats-record-word "hello" t 400)
+    (touchtype-stats-record-word "hello" nil 600)
+    (let* ((wstats (plist-get touchtype--stats :word-stats))
+           (entry (assoc "hello" wstats)))
+      (should entry)
+      (should (= 2 (plist-get (cdr entry) :hits)))
+      (should (= 1 (plist-get (cdr entry) :misses)))
+      (should (= 900 (plist-get (cdr entry) :total-ms))))))
+
+(ert-deftest touchtype-test-get-weak-words ()
+  "get-weak-words returns words sorted by confidence ascending."
+  (let ((touchtype--stats
+         (list :version 3 :letter-stats nil :bigram-stats nil
+               :mode-letter-stats nil :mode-bigram-stats nil
+               :word-stats (list (list "hello" :hits 50 :misses 0 :total-ms 25000)
+                                 (list "world" :hits 20 :misses 10 :total-ms 10000)
+                                 (list "the" :hits 10 :misses 8 :total-ms 5000)
+                                 (list "rare" :hits 3 :misses 2 :total-ms 1500))
+               :sessions nil :unlocked-keys "fj" :confidence nil)))
+    ;; "rare" has <5 hits, should be excluded
+    (let ((weak (touchtype-stats-get-weak-words 10)))
+      (should (= 3 (length weak)))
+      ;; "the" has worst confidence (10/18 = 0.55), then "world" (20/30 = 0.67)
+      (should (equal "the" (caar weak))))))
+
+(ert-deftest touchtype-test-weak-words-line-cold-start ()
+  "Weak-words line should fall back to common words with no word stats."
+  (let ((touchtype--stats
+         (list :version 3 :letter-stats nil :bigram-stats nil
+               :mode-letter-stats nil :mode-bigram-stats nil
+               :word-stats nil :sessions nil :unlocked-keys "fj" :confidence nil))
+        (touchtype-mode-selection 'weak-words)
+        (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz"))
+    (let ((line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (should (> (length line) 0)))))
+
+(ert-deftest touchtype-test-weak-words-line-with-stats ()
+  "Weak-words line should generate text from weak words."
+  (let ((touchtype--stats
+         (list :version 3 :letter-stats nil :bigram-stats nil
+               :mode-letter-stats nil :mode-bigram-stats nil
+               :word-stats (list (list "hello" :hits 50 :misses 0 :total-ms 25000)
+                                 (list "world" :hits 20 :misses 10 :total-ms 10000)
+                                 (list "the" :hits 10 :misses 8 :total-ms 5000)
+                                 (list "and" :hits 8 :misses 5 :total-ms 4000)
+                                 (list "test" :hits 6 :misses 4 :total-ms 3000))
+               :sessions nil :unlocked-keys "fj" :confidence nil))
+        (touchtype-mode-selection 'weak-words)
+        (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz"))
+    (let ((line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (should (> (length line) 10)))))
+
+(ert-deftest touchtype-test-v2-to-v3-migration ()
+  "Loading a v2 stats file migrates to v3 with word-stats initialized."
+  (let* ((tmp (make-temp-file "touchtype-stats-v2" nil ".el"))
+         (touchtype-stats-file tmp)
+         (touchtype--stats nil))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp
+            (let ((print-level nil)
+                  (print-length nil))
+              (pp '(touchtype-stats
+                    :version 2
+                    :letter-stats ((?f :hits 20 :misses 2 :total-ms 6000 :best-ms 200))
+                    :bigram-stats nil
+                    :mode-letter-stats nil
+                    :mode-bigram-stats nil
+                    :sessions nil
+                    :unlocked-keys "fj"
+                    :confidence nil)
+                  (current-buffer))))
+          (touchtype-stats-load)
+          (should (= 3 (plist-get touchtype--stats :version)))
+          (should (plist-member touchtype--stats :word-stats))
+          ;; Original data preserved
+          (let ((entry (assq ?f (plist-get touchtype--stats :letter-stats))))
+            (should entry)
+            (should (= 20 (touchtype-stats--entry-get entry :hits)))))
+      (delete-file tmp))))
+
+(ert-deftest touchtype-test-finger-keys-qwerty ()
+  "Finger-keys returns correct keys for each QWERTY finger."
+  (let ((touchtype-keyboard-layout 'qwerty))
+    (let ((keys (touchtype-algo--finger-keys 'left-pinky)))
+      (should (seq-contains-p keys ?q))
+      (should (seq-contains-p keys ?a))
+      (should (seq-contains-p keys ?z))
+      (should (= 3 (length keys))))
+    (let ((keys (touchtype-algo--finger-keys 'left-index)))
+      (should (= 6 (length keys)))
+      (should (seq-contains-p keys ?r))
+      (should (seq-contains-p keys ?t)))
+    (let ((keys (touchtype-algo--finger-keys 'right-pinky)))
+      (should (seq-contains-p keys ?p)))))
+
+(ert-deftest touchtype-test-finger-drill-generates-line ()
+  "Finger-drill mode generates a line using only the selected finger's keys."
+  (let ((touchtype-mode-selection 'finger-drill)
+        (touchtype--finger-selection 'left-index)
+        (touchtype-keyboard-layout 'qwerty)
+        (touchtype-line-length 40)
+        (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz"))
+    (let* ((allowed (touchtype-algo--finger-keys 'left-index))
+           (line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (should (> (length line) 5))
+      ;; Every non-space char should be in the allowed set
+      (dolist (ch (string-to-list (replace-regexp-in-string " " "" line)))
+        (should (seq-contains-p allowed ch #'=))))))
+
+(ert-deftest touchtype-test-line-length-respected ()
+  "Generated lines should approximate touchtype-line-length."
+  (let ((touchtype-mode-selection 'common-words)
+        (touchtype-line-length 40)
+        (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz"))
+    (let ((line (touchtype-algo-generate-line)))
+      (should (>= (length line) 30))
+      ;; Should not massively overshoot
+      (should (<= (length line) 80)))))
+
+(ert-deftest touchtype-test-weak-words-filters-short ()
+  "Weak words should not return words shorter than 3 characters."
+  (let ((touchtype--stats
+         (list :version 3 :letter-stats nil :bigram-stats nil
+               :mode-letter-stats nil :mode-bigram-stats nil
+               :word-stats (list (list "it" :hits 50 :misses 40 :total-ms 5000)
+                                 (list "the" :hits 50 :misses 40 :total-ms 5000)
+                                 (list "a" :hits 50 :misses 45 :total-ms 5000))
+               :sessions nil :unlocked-keys "fj" :confidence nil)))
+    (let ((weak (touchtype-stats-get-weak-words 10)))
+      ;; "it" and "a" should be filtered out (< 3 chars)
+      (should (= 1 (length weak)))
+      (should (equal "the" (car (car weak)))))))
+
+;;; ─── Progressive n-gram tests ───────────────────────────────────────────────
+
+(ert-deftest touchtype-test-progressive-ngrams-filters ()
+  "When `touchtype-progressive-unlock' is t, bigram lines only use unlocked keys."
+  (let ((touchtype-progressive-unlock t)
+        (touchtype-mode-selection 'bigram-drill)
+        (touchtype--unlocked-keys "therin")
+        (touchtype-line-length 40))
+    (dotimes (_ 10)
+      (let ((line (touchtype-algo-bigram-line)))
+        (dolist (ch (string-to-list line))
+          (should (or (= ch ?\s)
+                      (seq-contains-p "therin" ch #'=))))))))
+
+(ert-deftest touchtype-test-progressive-ngrams-off ()
+  "When `touchtype-progressive-unlock' is nil, bigram lines use all bigrams."
+  (let ((touchtype-progressive-unlock nil)
+        (touchtype-mode-selection 'bigram-drill)
+        (touchtype--unlocked-keys "therin")
+        (touchtype-line-length 40))
+    (let* ((chars nil))
+      (dotimes (_ 20)
+        (let ((line (touchtype-algo-bigram-line)))
+          (dolist (ch (string-to-list line))
+            (unless (= ch ?\s)
+              (cl-pushnew ch chars)))))
+      ;; Should have characters beyond the unlocked set
+      (should (> (length chars) 6)))))
+
+(ert-deftest touchtype-test-progressive-ngrams-predicate ()
+  "Verify `touchtype-algo--progressive-p' returns correct results."
+  ;; Progressive mode always returns t
+  (let ((touchtype-mode-selection 'progressive)
+        (touchtype-progressive-unlock nil))
+    (should (touchtype-algo--progressive-p)))
+  ;; Bigram-drill with flag on returns t
+  (let ((touchtype-mode-selection 'bigram-drill)
+        (touchtype-progressive-unlock t))
+    (should (touchtype-algo--progressive-p)))
+  ;; Bigram-drill with flag off returns nil
+  (let ((touchtype-mode-selection 'bigram-drill)
+        (touchtype-progressive-unlock nil))
+    (should-not (touchtype-algo--progressive-p)))
+  ;; Common-words with flag on now returns t
+  (let ((touchtype-mode-selection 'common-words)
+        (touchtype-progressive-unlock t))
+    (should (touchtype-algo--progressive-p)))
+  ;; Letters mode with flag on still returns nil (not in the list)
+  (let ((touchtype-mode-selection 'letters)
+        (touchtype-progressive-unlock t))
+    (should-not (touchtype-algo--progressive-p))))
+
+;;; ─── Quote mode data & predicate tests ──────────────────────────────────────
+
+(ert-deftest touchtype-test-quotes-are-cons-cells ()
+  "Every entry in `touchtype--quotes' should be a cons of two strings."
+  (cl-loop for i below (length touchtype--quotes)
+           for entry = (aref touchtype--quotes i)
+           do (should (consp entry))
+              (should (stringp (car entry)))
+              (should (stringp (cdr entry)))))
+
+(ert-deftest touchtype-test-quotes-have-punctuation ()
+  "Every quote text should end with a punctuation mark."
+  (cl-loop for i below (length touchtype--quotes)
+           for text = (car (aref touchtype--quotes i))
+           do (should (string-match-p "[.!?]$" text))))
+
+(ert-deftest touchtype-test-quote-in-progress-p ()
+  "Predicate should reflect whether a quote is partially typed."
+  ;; Mid-passage: should return non-nil
+  (let ((touchtype-mode-selection 'quote)
+        (touchtype--quote-passage "\"Test quote.\" - Author")
+        (touchtype--quote-offset 5))
+    (should (touchtype-algo--quote-in-progress-p)))
+  ;; Exhausted passage: should return nil
+  (let ((touchtype-mode-selection 'quote)
+        (touchtype--quote-passage "\"Test quote.\" - Author")
+        (touchtype--quote-offset 22))
+    (should-not (touchtype-algo--quote-in-progress-p)))
+  ;; Non-quote mode: should return nil
+  (let ((touchtype-mode-selection 'common-words)
+        (touchtype--quote-passage "\"Test quote.\" - Author")
+        (touchtype--quote-offset 5))
+    (should-not (touchtype-algo--quote-in-progress-p))))
+
+(ert-deftest touchtype-test-quote-mode-allows-double-quote ()
+  "Quote mode allowed chars should include double-quote character."
+  (let ((touchtype-mode-selection 'quote))
+    (should (seq-contains-p (touchtype-algo--allowed-for-mode) ?\"))))
+
+;;; ─── ASCII bar chart tests ──────────────────────────────────────────────────
+
+(ert-deftest touchtype-test-ascii-bar-full ()
+  "Value equal to max produces an all-filled bar."
+  (let ((bar (touchtype-ui--ascii-bar 10 10 20)))
+    (should (string= bar (make-string 20 ?█)))))
+
+(ert-deftest touchtype-test-ascii-bar-empty ()
+  "Value of 0 produces an all-empty bar."
+  (let ((bar (touchtype-ui--ascii-bar 0 10 20)))
+    (should (string= bar (make-string 20 ?░)))))
+
+(ert-deftest touchtype-test-ascii-bar-half ()
+  "Value at half of max produces a half-filled bar."
+  (let ((bar (touchtype-ui--ascii-bar 5 10 20)))
+    (should (string= bar (concat (make-string 10 ?█) (make-string 10 ?░))))))
+
+(ert-deftest touchtype-test-ascii-bar-zero-max ()
+  "Max of 0 does not crash and returns an all-empty bar."
+  (let ((bar (touchtype-ui--ascii-bar 5 0 20)))
+    (should (string= bar (make-string 20 ?░)))))
+
+(ert-deftest touchtype-test-ascii-bar-length ()
+  "Output length always equals the width parameter."
+  (dolist (width '(5 10 15 20 30))
+    (dolist (val '(0 3 7 10 15))
+      (should (= (length (touchtype-ui--ascii-bar val 10 width)) width)))))
+
+(ert-deftest touchtype-test-ascii-bar-clamp ()
+  "Value greater than max is clamped to a full bar."
+  (let ((bar (touchtype-ui--ascii-bar 20 10 20)))
+    (should (string= bar (make-string 20 ?█)))))
+
+;;; ─── Progressive unlock for additional modes ────────────────────────────────
+
+(ert-deftest touchtype-test-progressive-p-new-modes ()
+  "Predicate returns t for the new modes when progressive-unlock is enabled."
+  (dolist (mode '(common-words domain-words weak-letters weak-ngrams weak-mixed))
+    (let ((touchtype-mode-selection mode)
+          (touchtype-progressive-unlock t))
+      (should (touchtype-algo--progressive-p))))
+  ;; Still nil for modes not in the list
+  (dolist (mode '(letters full-words code))
+    (let ((touchtype-mode-selection mode)
+          (touchtype-progressive-unlock t))
+      (should-not (touchtype-algo--progressive-p)))))
+
+(ert-deftest touchtype-test-progressive-filter-words ()
+  "Helper filters words to unlocked chars, falls back on empty match."
+  (let ((touchtype--unlocked-keys "thes"))
+    ;; Only words using t, h, e, s survive
+    (let ((result (touchtype-algo--progressive-filter-words
+                   ["the" "set" "xyz" "she" "dog"])))
+      (should (vectorp result))
+      (should (cl-every (lambda (w)
+                          (cl-every (lambda (c)
+                                      (seq-contains-p "thes" c #'=))
+                                    w))
+                        result))
+      (should (>= (length result) 1)))
+    ;; When nothing matches, falls back to full input
+    (let ((result (touchtype-algo--progressive-filter-words
+                   ["xyz" "dog"])))
+      (should (= (length result) 2)))))
+
+(ert-deftest touchtype-test-progressive-common-words ()
+  "With progressive enabled, common-words line contains only unlocked chars."
+  (let ((touchtype-progressive-unlock t)
+        (touchtype-mode-selection 'common-words)
+        (touchtype--unlocked-keys "theansd")
+        (touchtype-common-words-count 200)
+        (touchtype-line-length 40))
+    (let ((line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (should (> (length line) 0))
+      (dolist (ch (string-to-list line))
+        (should (or (= ch ?\s)
+                    (seq-contains-p "theansd" ch #'=)))))))
+
+(ert-deftest touchtype-test-progressive-domain-words ()
+  "With progressive enabled, domain-words line contains only unlocked chars."
+  (let ((touchtype-progressive-unlock t)
+        (touchtype-mode-selection 'domain-words)
+        (touchtype--unlocked-keys "stringaympe")
+        (touchtype--domain-selection 'programming)
+        (touchtype-line-length 40))
+    (let ((line (touchtype-algo-generate-line)))
+      (should (stringp line))
+      (should (> (length line) 0))
+      (dolist (ch (string-to-list line))
+        (should (or (= ch ?\s)
+                    (seq-contains-p "stringaympe" ch #'=)))))))
+
+(ert-deftest touchtype-test-progressive-weak-letters ()
+  "With progressive enabled, weak-letters line contains only unlocked chars."
+  (let ((touchtype-progressive-unlock t)
+        (touchtype-mode-selection 'weak-letters)
+        (touchtype--unlocked-keys "fjdkslae")
+        (touchtype-line-length 40)
+        (touchtype-weak-letter-count 5)
+        (touchtype--stats
+         (list :version 1 :letter-stats nil :bigram-stats nil
+               :sessions nil :unlocked-keys "fjdkslae" :confidence nil)))
+    (let ((line (touchtype-algo--weak-letters-line)))
+      (should (stringp line))
+      (should (> (length line) 0))
+      (dolist (ch (string-to-list line))
+        (should (or (= ch ?\s)
+                    (seq-contains-p "fjdkslae" ch #'=)))))))
+
+(ert-deftest touchtype-test-progressive-weak-ngrams ()
+  "With progressive enabled, weak-ngrams line contains only unlocked chars."
+  (let ((touchtype-progressive-unlock t)
+        (touchtype-mode-selection 'weak-ngrams)
+        (touchtype--unlocked-keys "therinasd")
+        (touchtype-line-length 40)
+        (touchtype--stats
+         (list :version 1
+               :letter-stats (list (list ?t :hits 50 :misses 10
+                                         :total-ms 5000 :best-ms 80)
+                                   (list ?h :hits 50 :misses 10
+                                         :total-ms 5000 :best-ms 80))
+               :bigram-stats (list (list "th" :hits 30 :misses 5
+                                         :total-ms 3000 :best-ms 150)
+                                   (list "he" :hits 30 :misses 5
+                                         :total-ms 3000 :best-ms 150))
+               :sessions nil :unlocked-keys "therinasd" :confidence nil)))
+    (let ((line (touchtype-algo--weak-ngrams-line)))
+      (should (stringp line))
+      (should (> (length line) 0))
+      (dolist (ch (string-to-list line))
+        (should (or (= ch ?\s)
+                    (seq-contains-p "therinasd" ch #'=)))))))
 
 (provide 'touchtype-test)
 

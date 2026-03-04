@@ -49,6 +49,17 @@
 Loaded from `touchtype-stats-file' by `touchtype-stats-load' and
 written back by `touchtype-stats-save'.")
 
+;;;; Word stats helpers
+
+(defun touchtype-stats--word-entry (word)
+  "Return the stats plist for WORD string from `touchtype--stats'."
+  (let* ((wstats (plist-get touchtype--stats :word-stats))
+         (entry (assoc word wstats)))
+    (unless entry
+      (setq entry (list word :hits 0 :misses 0 :total-ms 0))
+      (plist-put touchtype--stats :word-stats (cons entry wstats)))
+    entry))
+
 ;;;; Helpers for the plist-of-plists structure
 
 (defun touchtype-stats--letter-entry (char)
@@ -124,13 +135,19 @@ If the file does not exist, initialise with an empty stats plist."
               (plist-put touchtype--stats :mode-letter-stats nil))
             (unless (plist-member touchtype--stats :mode-bigram-stats)
               (plist-put touchtype--stats :mode-bigram-stats nil))
-            (plist-put touchtype--stats :version 2))))
+            (plist-put touchtype--stats :version 2))
+          ;; Migrate v2 → v3: add word-stats key
+          (when (< (plist-get touchtype--stats :version) 3)
+            (unless (plist-member touchtype--stats :word-stats)
+              (plist-put touchtype--stats :word-stats nil))
+            (plist-put touchtype--stats :version 3))))
     (setq touchtype--stats
-          (list :version 2
+          (list :version 3
                 :letter-stats nil
                 :bigram-stats nil
                 :mode-letter-stats nil
                 :mode-bigram-stats nil
+                :word-stats nil
                 :sessions nil
                 :unlocked-keys "fj"
                 :confidence nil))))
@@ -356,6 +373,62 @@ When MODE is non-nil, use per-mode letter stats."
           (lambda (a b)
             (< (touchtype-stats-get-confidence a mode)
                (touchtype-stats-get-confidence b mode))))))
+
+;;;; Word-level statistics
+
+(defun touchtype-stats-record-word (word correct-p elapsed-ms)
+  "Record a word result for WORD.
+CORRECT-P is non-nil if every character was typed correctly.
+ELAPSED-MS is the total time for the word."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((entry (touchtype-stats--word-entry word))
+         (hits   (touchtype-stats--entry-get entry :hits))
+         (misses (touchtype-stats--entry-get entry :misses))
+         (total  (touchtype-stats--entry-get entry :total-ms)))
+    (if correct-p
+        (progn
+          (touchtype-stats--entry-put entry :hits (1+ hits))
+          (touchtype-stats--entry-put entry :total-ms (+ total elapsed-ms)))
+      (touchtype-stats--entry-put entry :misses (1+ misses)))))
+
+(defun touchtype-stats-get-word-confidence (word)
+  "Compute confidence score 0.0-1.0 for WORD.
+Uses the same accuracy * speed formula as letter/ngram confidence.
+Speed is normalized per-character: avg-ms-per-char vs target-ms.
+Returns 0.0 if no data."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((wstats (plist-get touchtype--stats :word-stats))
+         (entry (assoc word wstats))
+         (hits   (if entry (touchtype-stats--entry-get entry :hits) 0))
+         (misses (if entry (touchtype-stats--entry-get entry :misses) 0)))
+    (if (zerop hits)
+        0.0
+      (let* ((total-ms   (touchtype-stats--entry-get entry :total-ms))
+             (word-len   (max 1 (length word)))
+             (target-ms  (/ 60000.0 (* touchtype-target-wpm 5)))
+             (avg-ms     (/ (float total-ms) (* hits word-len)))
+             (speed-conf (min 1.0 (/ target-ms avg-ms)))
+             (accuracy   (/ (float hits) (+ hits misses))))
+        (* accuracy speed-conf)))))
+
+(defun touchtype-stats-get-weak-words (&optional n)
+  "Return N weakest words sorted by confidence ascending.
+Only includes words with at least 5 hits.  N defaults to 20."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((n (or n 20))
+         (wstats (plist-get touchtype--stats :word-stats))
+         (qualified
+          (cl-remove-if-not
+           (lambda (entry)
+             (and (>= (length (car entry)) 3)
+                  (>= (touchtype-stats--entry-get entry :hits) 5)))
+           wstats))
+         (sorted
+          (sort (copy-sequence qualified)
+                (lambda (a b)
+                  (< (touchtype-stats-get-word-confidence (car a))
+                     (touchtype-stats-get-word-confidence (car b)))))))
+    (seq-take sorted n)))
 
 ;;;; Session summary
 

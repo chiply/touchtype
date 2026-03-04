@@ -52,6 +52,15 @@
   :type 'float
   :group 'touchtype)
 
+(defcustom touchtype-progressive-unlock nil
+  "When non-nil, additional modes use progressive key unlock.
+Applicable modes filter their content to only characters present in
+`touchtype--unlocked-keys'.  New keys unlock as confidence grows."
+  :type 'boolean
+  :group 'touchtype)
+
+(defvaralias 'touchtype-progressive-ngrams 'touchtype-progressive-unlock)
+
 (defcustom touchtype-session-length 30
   "Number of words per training session."
   :type 'integer
@@ -83,13 +92,20 @@ One of: `progressive', `full-words', `bigram-drill', `letters',
                  (const :tag "Custom Text" custom)
                  (const :tag "Code" code)
                  (const :tag "Weak Letters" weak-letters)
-                 (const :tag "Weak Bigrams" weak-bigrams)
+                 (const :tag "Weak N-grams" weak-ngrams)
                  (const :tag "Weak Mixed" weak-mixed)
                  (const :tag "Quote" quote)
                  (const :tag "Domain Words" domain-words)
                  (const :tag "Left Hand" left-hand)
                  (const :tag "Right Hand" right-hand)
-                 (const :tag "Symbol Drill" symbol-drill))
+                 (const :tag "Symbol Drill" symbol-drill)
+                 (const :tag "Weak Words" weak-words)
+                 (const :tag "Finger Drill" finger-drill))
+  :group 'touchtype)
+
+(defcustom touchtype-line-length 70
+  "Target character width for generated practice lines."
+  :type 'integer
   :group 'touchtype)
 
 (defcustom touchtype-stats-history-length 20
@@ -121,8 +137,10 @@ One of: `progressive', `full-words', `bigram-drill', `letters',
   :type '(choice (const nil) string)
   :group 'touchtype)
 
-(defcustom touchtype-common-words-count 100
-  "Number of top common words to use in `common-words' mode."
+(defcustom touchtype-common-words-count 0
+  "Number of words to sample from in `common-words' mode.
+Words are organized by length, so smaller values prefer shorter words.
+0 means use the entire word list for a natural mix of lengths."
   :type 'integer
   :group 'touchtype)
 
@@ -221,7 +239,7 @@ Includes a background so mistyped spaces are visible."
 ;;;; Constants
 
 (defconst touchtype--qwerty-unlock-order
-  "fjdkslahetniourGcmpbywvxqz"
+  "fjdkslahetniourgcmpbywvxqz"
   "Order in which keys are progressively unlocked.
 Home-row index/middle/ring/pinky keys first, then by English
 letter frequency.  All 26 lower-case letters are represented.")
@@ -235,7 +253,7 @@ letter frequency.  All 26 lower-case letters are represented.")
   "Colemak layout progressive unlock order.")
 
 (defconst touchtype--workman-unlock-order
-  "nehtosaidrljgcmfpbkwvyxqz"
+  "nehtosaidruljgcmfpbkwvyxqz"
   "Workman layout progressive unlock order.")
 
 (defconst touchtype--numbers "0123456789"
@@ -367,63 +385,66 @@ Used by `touchtype-algo-ngram-line' for trigram-drill mode.")
   "Ordered list of the 100 most common English tetragrams.
 Used by `touchtype-algo-ngram-line' for tetragram-drill mode.")
 
-(defconst touchtype--code-snippets-by-language
-  '((python . ["def main():" "return None" "if x > 0:" "for i in range(n):"
-               "while True:" "import os" "class Foo:" "self.value = x"
-               "def __init__(self):" "yield from items" "with open(f) as fp:"
-               "try: x = int(s)" "except ValueError:" "raise RuntimeError(msg)"
-               "from typing import List" "lambda x: x * 2" "@staticmethod"
-               "if __name__ == '__main__':"])
-    (rust . ["fn main() {" "let mut v = Vec::new();" "match x {" "impl Trait for S {"
-             "pub fn new() -> Self {" "println!(\"hello\");" "Ok(())"
-             "use std::collections::HashMap;" "enum Color { Red, Blue }"
-             "struct Point { x: f64 }" "fn foo(s: &str) -> Result<()> {"
-             "if let Some(v) = opt {" "for item in &list {" "#[derive(Debug)]"
-             "Box::new(value)" "Arc::clone(&data)" "async fn fetch() -> Result<()> {"])
-    (go . ["func main() {" "if err != nil {" "fmt.Println(x)" "go func() {"
-            "defer f.Close()" "type Server struct {" "func (s *Server) Run() {"
-            "ch := make(chan int)" "select { case v := <-ch:" "for _, v := range items {"
-            "import \"fmt\"" "var wg sync.WaitGroup" "return nil, fmt.Errorf(msg)"
-            "ctx, cancel := context.WithCancel(ctx)" "map[string]interface{}{}"])
-    (javascript . ["const x = 42;" "let arr = [1, 2, 3];" "console.log(x);"
-                   "async function f() {" "return new Promise();" "export default {"
-                   "const fn = () => {" "try { await fetch(url) }"
-                   "catch (err) { throw err }" "Object.keys(obj).forEach(k => {"
-                   "const { a, b } = obj;" "import React from 'react';"
-                   "module.exports = fn;" "setTimeout(() => {}, 100);"
-                   "arr.map(x => x * 2)" "new Map([['a', 1]])"])
-    (elisp . ["(defun foo (x)" "(let ((a 1)))" "(setq x 42)"
-              "(lambda (x) (* x x))" "(require 'cl-lib)" "(provide 'my-pkg)"
-              "(defvar my-var nil)" "(defcustom opt 42" "(interactive \"P\")"
-              "(with-current-buffer buf" "(save-excursion (goto-char (point-min)))"
-              "(cl-loop for i below n collect i)" "(pcase x ('a 1) ('b 2))"
-              "(condition-case err" "(mapcar #'car alist)" "(add-hook 'mode-hook #'fn)"])
-    (bash . ["#!/bin/bash" "if [ -f $1 ]; then" "echo \"$HOME\""
-             "grep -r 'TODO'" "for f in *.txt; do" "while read -r line; do"
-             "case $1 in" "function cleanup() {" "trap cleanup EXIT"
-             "set -euo pipefail" "local var=\"${1:-default}\""
-             "find . -name '*.log' -delete" "curl -s $URL | jq '.data'"
-             "tar -czf archive.tar.gz dir/" "chmod +x script.sh"])
-    (sql . ["SELECT * FROM users;" "INSERT INTO t (a, b)" "CREATE TABLE t ("
-            "WHERE id = $1" "JOIN orders ON users.id = orders.uid"
-            "GROUP BY category HAVING count(*) > 5" "ORDER BY created_at DESC"
-            "ALTER TABLE t ADD COLUMN c TEXT;" "UPDATE t SET x = 1 WHERE id = 2;"
-            "DELETE FROM t WHERE expired = true;" "CREATE INDEX idx ON t (col);"
-            "BEGIN; COMMIT; ROLLBACK;" "EXPLAIN ANALYZE SELECT" "COALESCE(a, b, 0)"
-            "CASE WHEN x > 0 THEN 'yes' ELSE 'no' END"])
-    (c . ["int main() {" "printf(\"%d\\n\", x);" "#include <stdio.h>"
-           "struct Node {" "void *ptr = NULL;" "typedef struct { int x; } Point;"
-           "char *buf = malloc(256);" "if (ptr == NULL) return -1;"
-           "for (int i = 0; i < n; i++) {" "while (*p != '\\0') p++;"
-           "free(buf); buf = NULL;" "#define MAX(a, b) ((a) > (b) ? (a) : (b))"
-           "size_t len = strlen(s);" "memcpy(dst, src, n);"
-           "switch (op) { case '+':"]))
-  "Alist mapping language symbols to vectors of code snippets.")
+(defconst touchtype--code-blocks-by-language
+  `((python . ["def fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n - 1) + fibonacci(n - 2)"
+               "def greet(name):\n    msg = f\"Hello, {name}!\"\n    print(msg)\n    return msg"
+               "class Stack:\n    def __init__(self):\n        self.items = []\n\n    def push(self, x):\n        self.items.append(x)"
+               "def read_lines(path):\n    with open(path) as f:\n        for line in f:\n            yield line.strip()"
+               "def binary_search(arr, target):\n    lo, hi = 0, len(arr) - 1\n    while lo <= hi:\n        mid = (lo + hi) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            lo = mid + 1\n        else:\n            hi = mid - 1\n    return -1"
+               "try:\n    value = int(input(\"Enter a number: \"))\n    print(f\"You entered {value}\")\nexcept ValueError:\n    print(\"Invalid input\")"])
+    (rust . ["fn factorial(n: u64) -> u64 {\n    if n <= 1 {\n        return 1;\n    }\n    n * factorial(n - 1)\n}"
+             "struct Point {\n    x: f64,\n    y: f64,\n}\n\nimpl Point {\n    fn distance(&self) -> f64 {\n        (self.x.powi(2) + self.y.powi(2)).sqrt()\n    }\n}"
+             "fn main() {\n    let nums = vec![1, 2, 3, 4, 5];\n    let sum: i32 = nums.iter().sum();\n    println!(\"Sum: {}\", sum);\n}"
+             "fn parse_int(s: &str) -> Result<i32, String> {\n    s.parse::<i32>()\n        .map_err(|e| format!(\"parse error: {}\", e))\n}"
+             "enum Shape {\n    Circle(f64),\n    Rect(f64, f64),\n}\n\nfn area(s: &Shape) -> f64 {\n    match s {\n        Shape::Circle(r) => std::f64::consts::PI * r * r,\n        Shape::Rect(w, h) => w * h,\n    }\n}"
+             "use std::collections::HashMap;\n\nfn word_count(text: &str) -> HashMap<&str, usize> {\n    let mut map = HashMap::new();\n    for word in text.split_whitespace() {\n        *map.entry(word).or_insert(0) += 1;\n    }\n    map\n}"])
+    (go . ["func sum(nums []int) int {\n    total := 0\n    for _, n := range nums {\n        total += n\n    }\n    return total\n}"
+           "type Server struct {\n    Host string\n    Port int\n}\n\nfunc (s *Server) Addr() string {\n    return fmt.Sprintf(\"%s:%d\", s.Host, s.Port)\n}"
+           "func readFile(path string) ([]byte, error) {\n    data, err := os.ReadFile(path)\n    if err != nil {\n        return nil, fmt.Errorf(\"read %s: %w\", path, err)\n    }\n    return data, nil\n}"
+           "func main() {\n    ch := make(chan string)\n    go func() {\n        ch <- \"hello\"\n    }()\n    msg := <-ch\n    fmt.Println(msg)\n}"
+           "func filter(items []string, fn func(string) bool) []string {\n    var result []string\n    for _, item := range items {\n        if fn(item) {\n            result = append(result, item)\n        }\n    }\n    return result\n}"
+           "func handleErr(w http.ResponseWriter, err error) {\n    if err != nil {\n        http.Error(w, err.Error(), 500)\n        return\n    }\n}"])
+    (javascript . ["function debounce(fn, ms) {\n    let timer;\n    return function (...args) {\n        clearTimeout(timer);\n        timer = setTimeout(() => fn(...args), ms);\n    };\n}"
+                   "async function fetchJSON(url) {\n    const res = await fetch(url);\n    if (!res.ok) {\n        throw new Error(res.statusText);\n    }\n    return res.json();\n}"
+                   "class EventEmitter {\n    constructor() {\n        this.listeners = {};\n    }\n    on(event, fn) {\n        (this.listeners[event] ||= []).push(fn);\n    }\n}"
+                   "const flatten = (arr) => {\n    return arr.reduce((acc, val) => {\n        return acc.concat(\n            Array.isArray(val) ? flatten(val) : val\n        );\n    }, []);\n};"
+                   "function groupBy(arr, key) {\n    return arr.reduce((map, item) => {\n        const k = item[key];\n        (map[k] ||= []).push(item);\n        return map;\n    }, {});\n}"
+                   "const memoize = (fn) => {\n    const cache = new Map();\n    return (...args) => {\n        const key = JSON.stringify(args);\n        if (!cache.has(key)) {\n            cache.set(key, fn(...args));\n        }\n        return cache.get(key);\n    };\n};"])
+    (elisp . ["(defun my-filter (pred lst)\n  (let ((result nil))\n    (dolist (x lst)\n      (when (funcall pred x)\n        (push x result)))\n    (nreverse result)))"
+              "(defun my-assoc (key alist)\n  (cl-loop for pair in alist\n           when (equal (car pair) key)\n           return pair))"
+              "(defun count-words (str)\n  (let ((count 0)\n        (start 0))\n    (while (string-match \"\\\\w+\" str start)\n      (setq start (match-end 0))\n      (cl-incf count))\n    count))"
+              "(defun safe-read-file (path)\n  (condition-case err\n      (with-temp-buffer\n        (insert-file-contents path)\n        (buffer-string))\n    (file-error\n     (message \"Cannot read %s: %s\" path err)\n     nil)))"
+              "(defun join-strings (sep strings)\n  (mapconcat #'identity strings sep))"
+              "(defun flatten-list (lst)\n  (cond\n   ((null lst) nil)\n   ((listp (car lst))\n    (append (flatten-list (car lst))\n            (flatten-list (cdr lst))))\n   (t (cons (car lst)\n            (flatten-list (cdr lst))))))"])
+    (bash . ["#!/bin/bash\nset -euo pipefail\n\nfor f in \"$@\"; do\n    echo \"Processing $f\"\n    wc -l \"$f\"\ndone"
+             "function cleanup() {\n    rm -f \"$TMPFILE\"\n    echo \"Cleaned up\"\n}\ntrap cleanup EXIT\nTMPFILE=$(mktemp)"
+             "if [ -f \"$1\" ]; then\n    echo \"File exists: $1\"\n    cat \"$1\"\nelse\n    echo \"Not found: $1\" >&2\n    exit 1\nfi"
+             "while IFS= read -r line; do\n    if [[ \"$line\" =~ ^# ]]; then\n        continue\n    fi\n    echo \"$line\"\ndone < \"$1\""
+             "count=0\nfor dir in */; do\n    n=$(find \"$dir\" -type f | wc -l)\n    count=$((count + n))\n    echo \"$dir: $n files\"\ndone\necho \"Total: $count\""
+             "case \"$1\" in\n    start)\n        echo \"Starting service\"\n        ;;\n    stop)\n        echo \"Stopping service\"\n        ;;\n    *)\n        echo \"Usage: $0 {start|stop}\"\n        exit 1\n        ;;\nesac"])
+    (sql . ["SELECT u.name, COUNT(o.id) AS orders\nFROM users u\nJOIN orders o ON u.id = o.user_id\nGROUP BY u.name\nHAVING COUNT(o.id) > 5\nORDER BY orders DESC;"
+            "CREATE TABLE products (\n    id SERIAL PRIMARY KEY,\n    name TEXT NOT NULL,\n    price NUMERIC(10, 2) DEFAULT 0,\n    created_at TIMESTAMP DEFAULT NOW()\n);"
+            "UPDATE accounts\nSET balance = balance - 100\nWHERE id = 42\n    AND balance >= 100\nRETURNING id, balance;"
+            "WITH ranked AS (\n    SELECT name, score,\n        ROW_NUMBER() OVER (ORDER BY score DESC) AS rank\n    FROM players\n)\nSELECT * FROM ranked WHERE rank <= 10;"
+            "INSERT INTO logs (level, message, ts)\nVALUES ('ERROR', 'Connection failed', NOW())\nON CONFLICT (ts)\nDO UPDATE SET message = EXCLUDED.message;"
+            "DELETE FROM sessions\nWHERE last_active < NOW() - INTERVAL '30 days'\nRETURNING user_id, last_active;"])
+    (c . ["int factorial(int n) {\n    if (n <= 1) {\n        return 1;\n    }\n    return n * factorial(n - 1);\n}"
+          "#include <stdio.h>\n#include <stdlib.h>\n\nint main(int argc, char *argv[]) {\n    if (argc < 2) {\n        fprintf(stderr, \"Usage: %s <n>\\n\", argv[0]);\n        return 1;\n    }\n    printf(\"%d\\n\", atoi(argv[1]));\n    return 0;\n}"
+          "struct Node {\n    int value;\n    struct Node *next;\n};\n\nvoid push(struct Node **head, int val) {\n    struct Node *n = malloc(sizeof(*n));\n    n->value = val;\n    n->next = *head;\n    *head = n;\n}"
+          "char *strdup_safe(const char *s) {\n    if (s == NULL) {\n        return NULL;\n    }\n    size_t len = strlen(s) + 1;\n    char *copy = malloc(len);\n    if (copy) {\n        memcpy(copy, s, len);\n    }\n    return copy;\n}"
+          "void swap(int *a, int *b) {\n    int tmp = *a;\n    *a = *b;\n    *b = tmp;\n}"
+          "int binary_search(int *arr, int n, int target) {\n    int lo = 0, hi = n - 1;\n    while (lo <= hi) {\n        int mid = lo + (hi - lo) / 2;\n        if (arr[mid] == target)\n            return mid;\n        if (arr[mid] < target)\n            lo = mid + 1;\n        else\n            hi = mid - 1;\n    }\n    return -1;\n}"]))
+  "Alist mapping language symbols to vectors of multi-line code blocks.
+Each block is a complete, syntactically valid code snippet with
+newlines and indentation using spaces.")
 
-(defconst touchtype--code-snippets
+(defconst touchtype--code-blocks
   (apply #'vconcat
-         (mapcar #'cdr touchtype--code-snippets-by-language))
-  "Vector of all code snippets (computed from per-language collections).")
+         (mapcar #'cdr touchtype--code-blocks-by-language))
+  "Vector of all code blocks (computed from per-language collections).")
+
+(defvar touchtype--code-block-lines nil
+  "List of remaining lines from the current code block.")
 
 (defvar touchtype--code-language nil
   "Currently selected language for filtered `code' mode, or nil for all.")
@@ -1035,57 +1056,58 @@ distribution, and are suitable for typing practice.")
 ;;;; Quotes
 
 (defconst touchtype--quotes
-  ["the only way to do great work is to love what you do"
-   "in the middle of difficulty lies opportunity"
-   "it does not matter how slowly you go as long as you do not stop"
-   "life is what happens when you are busy making other plans"
-   "the unexamined life is not worth living"
-   "to be or not to be that is the question"
-   "i think therefore i am"
-   "the only thing we have to fear is fear itself"
-   "be the change you wish to see in the world"
-   "knowledge is power"
-   "the pen is mightier than the sword"
-   "those who cannot remember the past are condemned to repeat it"
-   "the greatest glory in living lies not in never falling but in rising every time we fall"
-   "the way to get started is to quit talking and begin doing"
-   "your time is limited so do not waste it living someone elses life"
-   "if life were predictable it would cease to be life and be without flavor"
-   "spread love everywhere you go let no one ever come to you without leaving happier"
-   "when you reach the end of your rope tie a knot in it and hang on"
-   "always remember that you are absolutely unique just like everyone else"
-   "the future belongs to those who believe in the beauty of their dreams"
-   "tell me and i forget teach me and i remember involve me and i learn"
-   "it is during our darkest moments that we must focus to see the light"
-   "whoever is happy will make others happy too"
-   "you will face many defeats in life but never let yourself be defeated"
-   "the greatest wealth is to live content with little"
-   "not all those who wander are lost"
-   "the only impossible journey is the one you never begin"
-   "we are what we repeatedly do excellence then is not an act but a habit"
-   "imagination is more important than knowledge"
-   "stay hungry stay foolish"
-   "simplicity is the ultimate sophistication"
-   "the best way to predict the future is to invent it"
-   "do what you can with what you have where you are"
-   "success is not final failure is not fatal it is the courage to continue that counts"
-   "a room without books is like a body without a soul"
-   "it always seems impossible until it is done"
-   "nothing is impossible the word itself says i am possible"
-   "the only limit to our realization of tomorrow will be our doubts of today"
-   "do not go where the path may lead go instead where there is no path and leave a trail"
-   "education is the most powerful weapon which you can use to change the world"
-   "in three words i can sum up everything i learned about life it goes on"
-   "life is really simple but we insist on making it complicated"
-   "the purpose of our lives is to be happy"
-   "get busy living or get busy dying"
-   "you only live once but if you do it right once is enough"
-   "many of lifes failures are people who did not realize how close they were to success"
-   "if you look at what you have in life you will always have more"
-   "if you set your goals ridiculously high and it is a failure you will fail above everyone else"
-   "life is a succession of lessons which must be lived to be understood"
-   "the mind is everything what you think you become"]
-  "Vector of famous quotes for `quote' typing mode.")
+  [("The only way to do great work is to love what you do." . "Steve Jobs")
+   ("In the middle of difficulty lies opportunity." . "Albert Einstein")
+   ("It does not matter how slowly you go as long as you do not stop." . "Confucius")
+   ("Life is what happens when you are busy making other plans." . "John Lennon")
+   ("The unexamined life is not worth living." . "Socrates")
+   ("To be or not to be, that is the question." . "William Shakespeare")
+   ("I think, therefore I am." . "Rene Descartes")
+   ("The only thing we have to fear is fear itself." . "Franklin D. Roosevelt")
+   ("Be the change you wish to see in the world." . "Mahatma Gandhi")
+   ("Knowledge is power." . "Francis Bacon")
+   ("The pen is mightier than the sword." . "Edward Bulwer-Lytton")
+   ("Those who cannot remember the past are condemned to repeat it." . "George Santayana")
+   ("The greatest glory in living lies not in never falling, but in rising every time we fall." . "Nelson Mandela")
+   ("The way to get started is to quit talking and begin doing." . "Walt Disney")
+   ("Your time is limited, so do not waste it living someone else's life." . "Steve Jobs")
+   ("If life were predictable, it would cease to be life and be without flavor." . "Eleanor Roosevelt")
+   ("Spread love everywhere you go. Let no one ever come to you without leaving happier." . "Mother Teresa")
+   ("When you reach the end of your rope, tie a knot in it and hang on." . "Franklin D. Roosevelt")
+   ("Always remember that you are absolutely unique, just like everyone else." . "Margaret Mead")
+   ("The future belongs to those who believe in the beauty of their dreams." . "Eleanor Roosevelt")
+   ("Tell me and I forget. Teach me and I remember. Involve me and I learn." . "Benjamin Franklin")
+   ("It is during our darkest moments that we must focus to see the light." . "Aristotle")
+   ("Whoever is happy will make others happy too." . "Anne Frank")
+   ("You will face many defeats in life, but never let yourself be defeated." . "Maya Angelou")
+   ("The greatest wealth is to live content with little." . "Plato")
+   ("Not all those who wander are lost." . "J.R.R. Tolkien")
+   ("The only impossible journey is the one you never begin." . "Tony Robbins")
+   ("We are what we repeatedly do. Excellence, then, is not an act, but a habit." . "Aristotle")
+   ("Imagination is more important than knowledge." . "Albert Einstein")
+   ("Stay hungry, stay foolish." . "Steve Jobs")
+   ("Simplicity is the ultimate sophistication." . "Leonardo da Vinci")
+   ("The best way to predict the future is to invent it." . "Alan Kay")
+   ("Do what you can, with what you have, where you are." . "Theodore Roosevelt")
+   ("Success is not final, failure is not fatal; it is the courage to continue that counts." . "Winston Churchill")
+   ("A room without books is like a body without a soul." . "Marcus Tullius Cicero")
+   ("It always seems impossible until it is done." . "Nelson Mandela")
+   ("Nothing is impossible. The word itself says I'm possible!" . "Audrey Hepburn")
+   ("The only limit to our realization of tomorrow will be our doubts of today." . "Franklin D. Roosevelt")
+   ("Do not go where the path may lead. Go instead where there is no path and leave a trail." . "Ralph Waldo Emerson")
+   ("Education is the most powerful weapon which you can use to change the world." . "Nelson Mandela")
+   ("In three words I can sum up everything I learned about life: it goes on." . "Robert Frost")
+   ("Life is really simple, but we insist on making it complicated." . "Confucius")
+   ("The purpose of our lives is to be happy." . "Dalai Lama")
+   ("Get busy living or get busy dying." . "Stephen King")
+   ("You only live once, but if you do it right, once is enough." . "Mae West")
+   ("Many of life's failures are people who did not realize how close they were to success." . "Thomas Edison")
+   ("If you look at what you have in life, you will always have more." . "Oprah Winfrey")
+   ("If you set your goals ridiculously high and it is a failure, you will fail above everyone else." . "James Cameron")
+   ("Life is a succession of lessons which must be lived to be understood." . "Ralph Waldo Emerson")
+   ("The mind is everything. What you think, you become." . "Buddha")]
+  "Vector of famous quotes for `quote' typing mode.
+Each entry is a cons cell (TEXT . AUTHOR) with proper punctuation.")
 
 ;;;; Domain word lists
 
@@ -1270,6 +1292,9 @@ distribution, and are suitable for typing practice.")
     (right-ring  . "R Ring")
     (right-pinky . "R Pinky"))
   "Display names for finger symbols.")
+
+(defvar touchtype--finger-selection 'left-index
+  "Currently selected finger for `finger-drill' mode.")
 
 ;;;; Rolling average window
 
