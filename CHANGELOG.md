@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/chiply/touchtype/compare/v0.1.5...v0.1.6) (2026-03-04)
+
+
+### Bug Fixes
+
+* bind pause to C-c C-p instead of reserved key ([0ebbbc2](https://github.com/chiply/touchtype/commit/0ebbbc2a74c0b05c5a98b2e3c2f0f1de12569ebc))
+
 ## [0.1.5](https://github.com/chiply/touchtype/compare/v0.1.4...v0.1.5) (2026-03-04)
 
 
