@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.7](https://github.com/chiply/touchtype/compare/v0.1.6...v0.1.7) (2026-03-04)
+
+
+### Features
+
+* add 10 gamification improvements ([a516320](https://github.com/chiply/touchtype/commit/a51632035ae7c2e9d4aa57202c9553d9921ed029))
+* add end-session heatmap, progress charts, and zen mode ([7c4e11e](https://github.com/chiply/touchtype/commit/7c4e11e00121cc009557e1df97bf90bca5e368d1))
+* progressive unlock for common-words, domain-words, and weak-* modes ([dea4834](https://github.com/chiply/touchtype/commit/dea483468a8998f4a80d78773647027057e2f424))
+
 ## [0.1.6](https://github.com/chiply/touchtype/compare/v0.1.5...v0.1.6) (2026-03-04)
 
 

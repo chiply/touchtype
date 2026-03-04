@@ -2,7 +2,7 @@
 
 (package "touchtype"
 ; x-release-please-start-version
-         "0.1.6"
+         "0.1.7"
 ; x-release-please-end
          "Keybr-style progressive touch typing trainer")
 
