@@ -622,6 +622,15 @@ With prefix ARG, set the duration in seconds."
   (touchtype-ui-show-stats))
 
 ;;;###autoload
+(defun touchtype-zen (&optional arg)
+  "Start a touchtype session in zen mode (no status line).
+With prefix ARG, set session length to that number of words."
+  (interactive "P")
+  (touchtype--apply-prefix-arg arg)
+  (setq touchtype-zen-mode t)
+  (touchtype-ui-setup-buffer))
+
+;;;###autoload
 (defalias 'touchtype-export #'touchtype-stats-export
   "Export typing statistics to a file.")
 

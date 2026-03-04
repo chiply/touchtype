@@ -320,8 +320,9 @@ Completed lines appear above the active line."
     (insert "\n")
     ;; Status line
     (setq touchtype--status-start (point-marker))
-    (insert (touchtype-ui--status-string))
-    (insert "\n")
+    (unless touchtype-zen-mode
+      (insert (touchtype-ui--status-string))
+      (insert "\n"))
     ;; Cursor underline on first character
     (touchtype-ui--update-cursor-overlay)))
 
@@ -364,12 +365,13 @@ _CHAR is accepted for API compatibility but unused."
 
 (defun touchtype-ui--update-status ()
   "Rewrite the status area in place."
-  (let ((inhibit-read-only t))
-    (save-excursion
-      (goto-char (marker-position touchtype--status-start))
-      (delete-region (point) (point-max))
-      (insert (touchtype-ui--status-string))
-      (insert "\n"))))
+  (unless touchtype-zen-mode
+    (let ((inhibit-read-only t))
+      (save-excursion
+        (goto-char (marker-position touchtype--status-start))
+        (delete-region (point) (point-max))
+        (insert (touchtype-ui--status-string))
+        (insert "\n")))))
 
 (defun touchtype-ui--status-string ()
   "Return a formatted status string for the current session state."
@@ -750,6 +752,7 @@ Shows SESSION FAILED header and records :failed t in session."
   (when (yes-or-no-p "Quit touchtype session? ")
     (touchtype-ui--cancel-session-timer)
     (touchtype-ui--stop-pace-caret)
+
     (touchtype-stats-save)
     (kill-buffer (current-buffer))))
 
@@ -1276,6 +1279,29 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
                             (car entry)
                             (touchtype-stats-get-bigram-confidence
                              (car entry) mode))))))
+      ;; Keyboard heatmap
+      (insert "\n** Keyboard Heatmap\n")
+      (let* ((rows (pcase touchtype-keyboard-layout
+                     ('qwerty  touchtype--qwerty-keyboard-rows)
+                     ('dvorak  touchtype--dvorak-keyboard-rows)
+                     ('colemak touchtype--colemak-keyboard-rows)
+                     ('workman touchtype--workman-keyboard-rows)
+                     (_        touchtype--qwerty-keyboard-rows)))
+             (indents '("  " "   " "    ")))
+        (cl-loop for row in rows
+                 for indent in indents
+                 do (insert indent)
+                 do (dotimes (i (length row))
+                      (let* ((ch (aref row i))
+                             (conf (touchtype-stats-get-confidence ch))
+                             (face (touchtype-ui--heatmap-face conf)))
+                        (insert (propertize (format "[%c]" ch) 'font-lock-face face))))
+                 do (insert "\n"))
+        (insert "  Legend: "
+                (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-cold) " no data  "
+                (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-struggling) " <0.3  "
+                (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-developing) " 0.3-0.6  "
+                (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-good) " >=0.6\n"))
       (insert "\n~TAB: fold/unfold  r: restart  q: quit~\n"))
     (org-mode)
     (org-table-map-tables #'org-table-align t)
@@ -1513,6 +1539,62 @@ Maps values to bar characters scaled min-to-max."
                             avg-ms hits)))))))
   (insert "\n"))
 
+;;;; Progress charts
+
+(defun touchtype-ui--render-progress-chart (values label unit)
+  "Render a multi-row vertical bar chart for VALUES.
+LABEL is the chart title (e.g. \"WPM\"), UNIT is the value unit.
+Chart uses 8 rows matching the 8 levels of `touchtype-ui--bar-chars'."
+  (when (and values (> (length values) 0))
+    (let* ((n (length values))
+           (lo (apply #'min values))
+           (hi (apply #'max values))
+           (avg (/ (cl-reduce #'+ values) (float n)))
+           (range (- hi lo))
+           (height 8)
+           (bar-chars touchtype-ui--bar-chars))
+      (insert (format "  %s (last %d sessions, avg %.0f%s)\n"
+                       label n avg unit))
+      ;; Render rows top to bottom
+      (dotimes (row height)
+        (let* ((inv-row (- height 1 row))
+               (threshold (if (zerop range)
+                             (if (>= inv-row (/ height 2)) 1.0 0.0)
+                           (/ (* inv-row range) (float (1- height))))))
+          ;; Y-axis label on first and last rows
+          (if (= row 0)
+              (insert (format "%4.0f ┤" hi))
+            (if (= row (1- height))
+                (insert (format "%4.0f ┤" lo))
+              (insert "     │")))
+          ;; Columns
+          (dolist (v values)
+            (let* ((normalized (if (zerop range) 0.5
+                                (/ (- v lo) (float range))))
+                   (level (min (1- height)
+                               (floor (* normalized (1- height)))))
+                   ;; level is 0..7 from bottom
+                   ;; inv-row is 0..7 from bottom (7=top, 0=bottom)
+                   )
+              (cond
+               ((> level inv-row)
+                ;; Full block
+                (insert (aref bar-chars (1- height))))
+               ((= level inv-row)
+                ;; Partial block
+                (let ((frac (if (zerop range) 4
+                              (let* ((step (/ range (float height)))
+                                     (cell-bottom (+ lo (* inv-row step)))
+                                     (within (- v cell-bottom))
+                                     (idx (min (1- height)
+                                               (floor (* (/ within step) height)))))
+                                (max 0 idx)))))
+                  (insert (aref bar-chars frac))))
+               (t
+                (insert " ")))))
+          (insert "\n")))
+      (insert "\n"))))
+
 ;;;; Stats view
 
 (defun touchtype-ui-show-stats ()
@@ -1656,6 +1738,18 @@ Maps values to bar characters scaled min-to-max."
                          do (insert (format "  %2d. %s %.0f%%\n"
                                             i (touchtype-ui--ascii-bar v acc-max 15) v)))
                 (insert "#+end_example\n"))))
+          ;; 4b. Progress charts
+          (when (> n-sessions 1)
+            (insert "\n* Progress\n")
+            (let* ((chart-sessions (seq-take sessions touchtype-stats-progress-length))
+                   (chart-wpms (nreverse (mapcar (lambda (s) (plist-get (cdr s) :wpm))
+                                                  chart-sessions)))
+                   (chart-accs (nreverse (mapcar (lambda (s) (plist-get (cdr s) :accuracy))
+                                                  chart-sessions))))
+              (insert "#+begin_example\n")
+              (touchtype-ui--render-progress-chart chart-wpms "WPM" "")
+              (touchtype-ui--render-progress-chart chart-accs "Accuracy" "%")
+              (insert "#+end_example\n")))
           ;; 5. Session history
           (insert "\n* Session History\n")
           (let ((recent (seq-take sessions touchtype-stats-history-length)))

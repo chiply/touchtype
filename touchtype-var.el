@@ -202,6 +202,17 @@ With fewer hits, confidence is scaled down proportionally."
   :type 'boolean
   :group 'touchtype)
 
+(defcustom touchtype-zen-mode nil
+  "When non-nil, hide the status line during typing sessions.
+Stats are still tracked and shown at session end."
+  :type 'boolean
+  :group 'touchtype)
+
+(defcustom touchtype-stats-progress-length 40
+  "Number of recent sessions to display in progress charts."
+  :type 'integer
+  :group 'touchtype)
+
 (defcustom touchtype-confidence-ema-alpha 0.15
   "Smoothing factor for exponential moving average of keystroke times.
 Higher values weight recent keystrokes more heavily (0.0-1.0)."
