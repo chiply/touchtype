@@ -73,7 +73,7 @@ installs command remaps as a safety net for minor-mode bindings."
     (define-key map (kbd "TAB") #'touchtype-ui--quick-restart)
     (define-key map (kbd "RET") #'touchtype-ui--ignore-key)
     (define-key map (kbd "C-g") #'touchtype-ui--quit)
-    (define-key map (kbd "p") #'touchtype-ui--toggle-pause)
+    (define-key map (kbd "C-c C-p") #'touchtype-ui--toggle-pause)
     map))
 
 ;;;; Buffer setup

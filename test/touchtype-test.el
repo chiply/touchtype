@@ -2029,10 +2029,10 @@ as focus chars in generated lines."
     (let ((touchtype-difficulty d))
       (should (eq touchtype-difficulty d)))))
 
-(ert-deftest touchtype-test-p-bound-in-keymap ()
-  "p should be bound to toggle-pause in the keymap."
+(ert-deftest touchtype-test-pause-bound-in-keymap ()
+  "C-c C-p should be bound to toggle-pause in the keymap."
   (let ((map (touchtype-ui--make-keymap)))
-    (should (eq (lookup-key map (kbd "p")) #'touchtype-ui--toggle-pause))))
+    (should (eq (lookup-key map (kbd "C-c C-p")) #'touchtype-ui--toggle-pause))))
 
 (ert-deftest touchtype-test-status-shows-difficulty ()
   "Status string should show difficulty when not normal."
