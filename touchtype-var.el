@@ -230,27 +230,6 @@ nil: no highlighting (default)."
                  (const :tag "Next two words" next-two))
   :group 'touchtype)
 
-(defcustom touchtype-sound-enabled nil
-  "When non-nil, play audio feedback on keypresses."
-  :type 'boolean
-  :group 'touchtype)
-
-(defcustom touchtype-sound-pack 'tink
-  "Sound pack for typing feedback.
-Each pack maps to a pair of system sounds (correct, error).
-On macOS, sounds are played via `afplay' from /System/Library/Sounds/.
-On other systems, sounds are played via `play-sound-file' if available."
-  :type '(choice (const :tag "Tink (subtle)" tink)
-                 (const :tag "Pop (soft)" pop)
-                 (const :tag "Typewriter (click)" typewriter)
-                 (const :tag "Morse (mechanical)" morse))
-  :group 'touchtype)
-
-(defcustom touchtype-sound-volume 0.3
-  "Volume for typing sounds (0.0 to 1.0)."
-  :type 'float
-  :group 'touchtype)
-
 (defvar touchtype--zen-active nil
   "Non-nil when the current session was started via `touchtype-zen'.
 This is buffer-local and reset each session.")
@@ -373,6 +352,20 @@ Includes a background so mistyped spaces are visible."
   :group 'touchtype)
 
 ;;;; Constants
+
+(defconst touchtype--wpm-percentile-table
+  ;; Based on published typing speed distribution data.
+  ;; Each entry is (WPM . PERCENTILE).
+  ;; Sources: typing speed studies, monkeytype/typeracer aggregated data.
+  '((10 . 2) (15 . 5) (20 . 10) (25 . 18) (30 . 28)
+    (35 . 38) (40 . 50) (45 . 58) (50 . 66) (55 . 73)
+    (60 . 78) (65 . 83) (70 . 87) (75 . 90) (80 . 93)
+    (85 . 95) (90 . 96) (95 . 97) (100 . 98) (110 . 99)
+    (120 . 99.3) (130 . 99.5) (140 . 99.7) (150 . 99.9))
+  "Lookup table mapping WPM to approximate percentile ranking.
+Based on aggregated typing speed distribution data from online
+typing tests.  Used to show users how they compare to the general
+typing population.")
 
 (defconst touchtype--qwerty-unlock-order
   "fjdkslahetniourgcmpbywvxqz"

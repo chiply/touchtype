@@ -875,8 +875,6 @@ Shows SESSION FAILED header and records :failed t in session."
       (touchtype-ui--update-typed-char
        pos char
        (if correct-p 'touchtype-face-correct 'touchtype-face-wrong))
-      ;; Audio feedback
-      (touchtype-ui--play-sound correct-p)
       ;; Track for status display
       (push (list char correct-p elapsed) touchtype--typed-chars)
       (cl-incf touchtype--session-total-keys)
@@ -951,8 +949,6 @@ Shows SESSION FAILED header and records :failed t in session."
     (touchtype-ui--cancel-session-timer)
     (touchtype-ui--stop-pace-caret)
     (touchtype-ui--stop-wpm-sampling)
-    (touchtype-ui--stop-sound-process)
-
     (remove-hook 'window-size-change-functions
                  #'touchtype-ui--update-margins t)
     (touchtype-stats-save)
@@ -1662,72 +1658,6 @@ Maps values to bar characters scaled min-to-max."
                          (aref touchtype-ui--bar-chars idx)))
                      wpms)))))
 
-;;;; Typing sounds
-
-(defconst touchtype-ui--sound-packs
-  '((tink       . ("Tink"   "Funk"))
-    (pop        . ("Pop"    "Basso"))
-    (typewriter . ("Ping"   "Frog"))
-    (morse      . ("Morse"  "Submarine")))
-  "Alist mapping sound pack symbols to (CORRECT-SOUND ERROR-SOUND) names.")
-
-(defvar touchtype-ui--sound-process nil
-  "Persistent sound daemon process.")
-
-(defvar touchtype-ui--sound-binary nil
-  "Path to compiled sound player binary.")
-
-(defun touchtype-ui--ensure-sound-binary ()
-  "Compile the sound player binary if needed.  Return its path."
-  (unless (and touchtype-ui--sound-binary
-               (file-exists-p touchtype-ui--sound-binary))
-    (let* ((src (expand-file-name "touchtype-sound.swift"
-                                  (file-name-directory
-                                   (or load-file-name
-                                       (locate-library "touchtype-ui")
-                                       default-directory))))
-           (bin (expand-file-name "touchtype-sound"
-                                  (temporary-file-directory))))
-      (unless (file-exists-p bin)
-        (let ((ret (call-process "swiftc" nil nil nil "-O" "-o" bin src)))
-          (unless (= ret 0)
-            (error "Failed to compile touchtype-sound binary"))))
-      (setq touchtype-ui--sound-binary bin)))
-  touchtype-ui--sound-binary)
-
-(defun touchtype-ui--ensure-sound-process ()
-  "Start the persistent sound daemon if not running."
-  (unless (and touchtype-ui--sound-process
-               (process-live-p touchtype-ui--sound-process))
-    (let ((bin (touchtype-ui--ensure-sound-binary)))
-      (setq touchtype-ui--sound-process
-            (make-process :name "touchtype-sound"
-                          :command (list bin)
-                          :noquery t
-                          :connection-type 'pipe))
-      ;; Wait for READY signal
-      (accept-process-output touchtype-ui--sound-process 3))))
-
-(defun touchtype-ui--stop-sound-process ()
-  "Stop the persistent sound daemon."
-  (when (and touchtype-ui--sound-process
-             (process-live-p touchtype-ui--sound-process))
-    (delete-process touchtype-ui--sound-process))
-  (setq touchtype-ui--sound-process nil))
-
-(defun touchtype-ui--play-sound (correct-p)
-  "Play a typing sound via the persistent sound daemon.
-CORRECT-P selects between the correct and error sounds."
-  (when (and touchtype-sound-enabled (eq system-type 'darwin))
-    (condition-case nil
-        (let* ((pack (or (cdr (assq touchtype-sound-pack
-                                    touchtype-ui--sound-packs))
-                         '("Tink" "Funk")))
-               (name (if correct-p (car pack) (cadr pack))))
-          (touchtype-ui--ensure-sound-process)
-          (process-send-string touchtype-ui--sound-process
-                               (format "%s %s\n" name touchtype-sound-volume)))
-      (error nil))))
 
 ;;;; Pace caret
 
