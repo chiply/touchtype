@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.12](https://github.com/chiply/touchtype/compare/v0.1.11...v0.1.12) (2026-03-05)
+
+
+### Features
+
+* add focus/highlight mode for upcoming words ([7b41379](https://github.com/chiply/touchtype/commit/7b4137973dc366e0a85b659011eef86f82a42bfc))
+* add optional typing sound feedback ([4ba900f](https://github.com/chiply/touchtype/commit/4ba900f9fc990455c454eba0351dca3be541dc97))
+* add WPM percentile lookup function ([0353721](https://github.com/chiply/touchtype/commit/03537211cc7da5207648796f7eea62c9461a78fd))
+* add WPM-over-time graph to session results ([0f5050a](https://github.com/chiply/touchtype/commit/0f5050ad82abfd233ec5b53610bfa9d2fe4dc3d4))
+* show global percentile estimate on session results ([c7a8a22](https://github.com/chiply/touchtype/commit/c7a8a22f8ea94a98fa01955702a0c610397d071f))
+
+
+### Bug Fixes
+
+* eliminate typing sound latency with persistent NSSound daemon ([e19710a](https://github.com/chiply/touchtype/commit/e19710a9231c3084a73eebd6689aa976b2ed0f9b))
+
+
+### Reverts
+
+* remove typing sound feedback feature ([cd13859](https://github.com/chiply/touchtype/commit/cd1385904565fad14e01611f00e184854757e766))
+
 ## [0.1.11](https://github.com/chiply/touchtype/compare/v0.1.10...v0.1.11) (2026-03-05)
 
 
