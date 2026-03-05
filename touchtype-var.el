@@ -218,6 +218,27 @@ For per-session zen mode, use `touchtype-zen' instead."
   :type 'boolean
   :group 'touchtype)
 
+(defcustom touchtype-sound-enabled nil
+  "When non-nil, play audio feedback on keypresses."
+  :type 'boolean
+  :group 'touchtype)
+
+(defcustom touchtype-sound-pack 'tink
+  "Sound pack for typing feedback.
+Each pack maps to a pair of system sounds (correct, error).
+On macOS, sounds are played via `afplay' from /System/Library/Sounds/.
+On other systems, sounds are played via `play-sound-file' if available."
+  :type '(choice (const :tag "Tink (subtle)" tink)
+                 (const :tag "Pop (soft)" pop)
+                 (const :tag "Typewriter (click)" typewriter)
+                 (const :tag "Morse (mechanical)" morse))
+  :group 'touchtype)
+
+(defcustom touchtype-sound-volume 0.3
+  "Volume for typing sounds (0.0 to 1.0)."
+  :type 'float
+  :group 'touchtype)
+
 (defvar touchtype--zen-active nil
   "Non-nil when the current session was started via `touchtype-zen'.
 This is buffer-local and reset each session.")

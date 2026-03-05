@@ -811,6 +811,8 @@ Shows SESSION FAILED header and records :failed t in session."
       (touchtype-ui--update-typed-char
        pos char
        (if correct-p 'touchtype-face-correct 'touchtype-face-wrong))
+      ;; Audio feedback
+      (touchtype-ui--play-sound correct-p)
       ;; Track for status display
       (push (list char correct-p elapsed) touchtype--typed-chars)
       (cl-incf touchtype--session-total-keys)
@@ -1592,6 +1594,41 @@ Maps values to bar characters scaled min-to-max."
                                                    (1- n-bars)))))))
                          (aref touchtype-ui--bar-chars idx)))
                      wpms)))))
+
+;;;; Typing sounds
+
+(defconst touchtype-ui--sound-packs
+  '((tink  . ("Tink.aiff"  "Funk.aiff"))
+    (pop   . ("Pop.aiff"   "Basso.aiff"))
+    (typewriter . ("Tink.aiff" "Basso.aiff"))
+    (morse . ("Morse.aiff" "Funk.aiff")))
+  "Alist mapping sound pack symbols to (CORRECT-SOUND ERROR-SOUND) filenames.")
+
+(defvar touchtype-ui--sound-process nil
+  "Most recent sound process, kept to avoid overlapping sounds.")
+
+(defun touchtype-ui--play-sound (correct-p)
+  "Play a typing sound asynchronously.
+CORRECT-P selects between the correct and error sounds."
+  (when touchtype-sound-enabled
+    (let* ((pack (or (cdr (assq touchtype-sound-pack touchtype-ui--sound-packs))
+                     '("Tink.aiff" "Funk.aiff")))
+           (sound-file (if correct-p (car pack) (cadr pack))))
+      (cond
+       ;; macOS: use afplay for non-blocking async playback
+       ((and (eq system-type 'darwin)
+             (file-exists-p (concat "/System/Library/Sounds/" sound-file)))
+        (when (and touchtype-ui--sound-process
+                   (process-live-p touchtype-ui--sound-process))
+          (delete-process touchtype-ui--sound-process))
+        (setq touchtype-ui--sound-process
+              (start-process "touchtype-sound" nil "afplay"
+                             "-v" (number-to-string touchtype-sound-volume)
+                             (concat "/System/Library/Sounds/" sound-file))))
+       ;; Other systems: try play-sound-file if available
+       ((fboundp 'play-sound-file)
+        (ignore-errors
+          (play-sound-file (concat "/usr/share/sounds/" sound-file))))))))
 
 ;;;; Pace caret
 
