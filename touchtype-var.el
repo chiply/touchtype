@@ -103,8 +103,17 @@ One of: `progressive', `full-words', `bigram-drill', `letters',
                  (const :tag "Finger Drill" finger-drill))
   :group 'touchtype)
 
-(defcustom touchtype-line-length 70
-  "Target character width for generated practice lines."
+(defcustom touchtype-text-width 70
+  "Target character width for generated practice text.
+This controls both the word-wrap width and the centering margins
+in the typing buffer."
+  :type 'integer
+  :group 'touchtype)
+
+(defvaralias 'touchtype-line-length 'touchtype-text-width)
+
+(defcustom touchtype-text-width-step 10
+  "Number of columns to grow or shrink per width adjustment."
   :type 'integer
   :group 'touchtype)
 
@@ -212,6 +221,20 @@ For per-session zen mode, use `touchtype-zen' instead."
 (defvar touchtype--zen-active nil
   "Non-nil when the current session was started via `touchtype-zen'.
 This is buffer-local and reset each session.")
+
+(defvar touchtype--session-ending nil
+  "Non-nil when a timed session has expired but is deferring end.
+Used to let quote-mode passages finish before ending the session.
+This is buffer-local and reset each session.")
+
+(defvar touchtype--weak-ngrams-cache nil
+  "Cached result of `touchtype-stats-get-weak-ngrams' for line generation.
+Set once at session start, cleared on session end.  Avoids re-sorting
+thousands of bigram entries on every new line.")
+
+(defvar touchtype--valid-words-cache nil
+  "Cached list of valid words for the current mode's allowed characters.
+Avoids re-filtering `touchtype--builtin-words' on every line generation.")
 
 (defcustom touchtype-stats-progress-length 40
   "Number of recent sessions to display in progress charts."

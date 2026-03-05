@@ -74,6 +74,9 @@ installs command remaps as a safety net for minor-mode bindings."
     (define-key map (kbd "RET") #'touchtype-ui--handle-return)
     (define-key map (kbd "C-g") #'touchtype-ui--quit)
     (define-key map (kbd "C-c C-p") #'touchtype-ui--toggle-pause)
+    (define-key map (kbd "C-c +") #'touchtype-grow-width)
+    (define-key map (kbd "C-c =") #'touchtype-grow-width)
+    (define-key map (kbd "C-c -") #'touchtype-shrink-width)
     map))
 
 ;;;; Results buffer helpers
@@ -120,6 +123,25 @@ Inherits `org-mode' and adds touchtype-specific bindings."
   (define-key touchtype-stats-mode-map (kbd "C-c C-q") #'kill-current-buffer))
 
 ;;;; Buffer setup
+
+(defun touchtype-ui--update-margins (&optional _frame)
+  "Set left/right margins to center text at `touchtype-text-width'.
+Falls back to zero margins if the window is too narrow.
+Optional _FRAME argument is accepted for `window-size-change-functions'."
+  (when-let* ((win (get-buffer-window "*touchtype*"))
+              (buf (window-buffer win)))
+    (with-current-buffer buf
+      ;; Usable width = body + current margins (excludes fringes/scrollbar)
+      (let* ((cur-margins (window-margins win))
+             (usable (+ (window-body-width win)
+                        (or (car cur-margins) 0)
+                        (or (cdr cur-margins) 0)))
+             (effective (min touchtype-text-width usable))
+             (margin (max 0 (/ (- usable effective) 2))))
+        (setq left-margin-width margin
+              right-margin-width margin)
+        (set-window-margins win margin margin)
+        (set-window-buffer win buf)))))
 
 (defun touchtype-ui-setup-buffer ()
   "Create or reset the *touchtype* training buffer and display it."
@@ -171,7 +193,9 @@ Inherits `org-mode' and adds touchtype-specific bindings."
                        touchtype--perfect-line-achieved
                        touchtype--session-key-stats
                        touchtype--zen-active
-                       touchtype--session-ending))
+                       touchtype--session-ending
+                       touchtype--weak-ngrams-cache
+                       touchtype--valid-words-cache))
           (make-local-variable sym))
         ;; Load persisted state (force re-read from disk)
         (touchtype-stats-load t)
@@ -203,12 +227,20 @@ Inherits `org-mode' and adds touchtype-specific bindings."
         (use-local-map touchtype-ui--keymap)
         (setq-local cursor-type nil)
         (font-lock-mode -1)
+        ;; Word-wrap and centering via margins
+        (setq-local word-wrap t)
+        (setq-local truncate-lines nil)
+        (setq-local truncate-partial-width-windows nil)
         (setq buffer-read-only t)
         ;; Keep point anchored to the typing area after every command.
         ;; This prevents Evil (and anything else) from drifting into the
         ;; status line or acting on buffer text directly.
-        (add-hook 'post-command-hook #'touchtype-ui--enforce-point nil t)))
+        (add-hook 'post-command-hook #'touchtype-ui--enforce-point nil t)
+        (add-hook 'window-size-change-functions
+                  #'touchtype-ui--update-margins nil t)))
     (switch-to-buffer buf)
+    ;; Set margins now that the buffer is visible in a window
+    (touchtype-ui--update-margins)
     ;; Enter Evil's emacs state AFTER switching to the buffer so that
     ;; Evil's buffer-switch hooks cannot reset the state back to normal.
     (when (and (fboundp 'evil-emacs-state)
@@ -340,17 +372,23 @@ session budget so the user never sees words they won't type."
         touchtype--last-key-time   nil)
   (touchtype-ui--redraw-buffer))
 
+(defun touchtype-ui--passage-mode-p ()
+  "Return non-nil if the current mode uses passage-based text with natural line breaks."
+  (memq touchtype-mode-selection '(narrative quote custom code)))
+
 (defun touchtype-ui--redraw-buffer ()
   "Redraw the entire *touchtype* buffer content.
-Completed lines appear above the active line."
+Completed lines appear above the active line.
+In word-generating modes, text flows continuously with word-wrap.
+In passage modes (narrative, quote, custom, code), newlines are preserved."
   (let* ((inhibit-read-only t)
-         (text touchtype--current-text))
+         (text touchtype--current-text)
+         (sep (if (touchtype-ui--passage-mode-p) "\n" " ")))
     (erase-buffer)
     ;; Completed lines (dim history above the active line)
     (dolist (line (reverse touchtype--completed-lines))
-      (insert "  " line "\n"))
+      (insert line sep))
     ;; Active line: each character gets an overlay starting as gray.
-    (insert "  ")
     (setq touchtype--target-start (point-marker))
     (let ((n (length text)))
       (setq touchtype--char-overlays (make-vector n nil))
@@ -360,11 +398,14 @@ Completed lines appear above the active line."
           (let ((ov (make-overlay buf-pos (point))))
             (overlay-put ov 'face 'touchtype-face-untyped)
             (aset touchtype--char-overlays i ov)))))
-    (insert "\n")
+    ;; In flowing mode the active line's trailing space acts as separator;
+    ;; in passage mode insert a newline.
+    (when (touchtype-ui--passage-mode-p)
+      (insert "\n"))
     ;; Preview lines (gray, no overlays)
     (when (and touchtype--preview-texts (> touchtype-preview-lines 0))
       (dolist (preview touchtype--preview-texts)
-        (insert "  " (propertize preview 'face 'touchtype-face-untyped) "\n")))
+        (insert (propertize preview 'face 'touchtype-face-untyped) sep)))
     (insert "\n")
     ;; Status line
     (setq touchtype--status-start (point-marker))
@@ -411,9 +452,27 @@ _CHAR is accepted for API compatibility but unused."
       (overlay-put ov 'face 'touchtype-face-untyped)
       (overlay-put ov 'priority 5))))
 
+(defun touchtype-ui--cleanup-overlays ()
+  "Remove all session overlays and nil out markers.
+Call before erasing the buffer to prevent stale marker errors."
+  (when touchtype--cursor-overlay
+    (delete-overlay touchtype--cursor-overlay)
+    (setq touchtype--cursor-overlay nil))
+  (when touchtype--pace-overlay
+    (delete-overlay touchtype--pace-overlay)
+    (setq touchtype--pace-overlay nil))
+  (when (vectorp touchtype--char-overlays)
+    (dotimes (i (length touchtype--char-overlays))
+      (when-let* ((ov (aref touchtype--char-overlays i)))
+        (delete-overlay ov)))
+    (setq touchtype--char-overlays nil))
+  (setq touchtype--target-start nil
+        touchtype--status-start nil))
+
 (defun touchtype-ui--update-status ()
   "Rewrite the status area in place."
-  (unless (or touchtype-zen-mode touchtype--zen-active)
+  (when (and touchtype--status-start
+             (not (or touchtype-zen-mode touchtype--zen-active)))
     (let ((inhibit-read-only t))
       (save-excursion
         (goto-char (marker-position touchtype--status-start))
@@ -592,6 +651,7 @@ Shows SESSION FAILED header and records :failed t in session."
     (touchtype-stats-save)
     (setq touchtype--current-text nil)
     (remove-hook 'post-command-hook #'touchtype-ui--enforce-point t)
+    (touchtype-ui--cleanup-overlays)
     (setq-local cursor-type t)
     (let ((inhibit-read-only t))
       (erase-buffer)
@@ -637,6 +697,10 @@ Shows SESSION FAILED header and records :failed t in session."
          (elapsed (round (* 1000 elapsed-s)))
          (expected (when (< pos n) (aref text pos)))
          (correct-p (and expected (= char expected))))
+    ;; At end of line: SPC or RET advances to next line
+    (when (and (>= pos n) (memq char '(?\s ?\r)))
+      (touchtype-ui--advance-line)
+      (cl-return-from touchtype-ui--process-char))
     (when (< pos n)
       ;; Difficulty tier: master mode - fail on any wrong key
       (when (and (eq touchtype-difficulty 'master) (not correct-p))
@@ -811,6 +875,8 @@ Shows SESSION FAILED header and records :failed t in session."
     (touchtype-ui--cancel-session-timer)
     (touchtype-ui--stop-pace-caret)
 
+    (remove-hook 'window-size-change-functions
+                 #'touchtype-ui--update-margins t)
     (touchtype-stats-save)
     (kill-buffer (current-buffer))))
 
@@ -1214,6 +1280,7 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
     ;; Disable typing-area cursor lock so the end-session buffer is navigable
     (setq touchtype--current-text nil)
     (remove-hook 'post-command-hook #'touchtype-ui--enforce-point t)
+    (touchtype-ui--cleanup-overlays)
     (setq-local cursor-type t)
     (let ((inhibit-read-only t))
       (erase-buffer)
@@ -1395,11 +1462,14 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
 
 (defun touchtype-ui--restart-session ()
   "Reset counters and start a new session.
-Calls `touchtype-ui-setup-buffer' to fully re-initialize the buffer,
-restoring `touchtype-mode', the typing keymap, and Evil emacs-state."
+Kills the current buffer and creates a fresh one via
+`touchtype-ui-setup-buffer', avoiding stale org-mode/jit-lock state."
   (interactive)
   (touchtype-ui--cancel-session-timer)
   (touchtype-ui--stop-pace-caret)
+  ;; Kill the buffer outright so org-mode's jit-lock state is fully
+  ;; discarded, then create a fresh *touchtype* buffer.
+  (kill-buffer (current-buffer))
   (touchtype-ui-setup-buffer))
 
 (defun touchtype-ui--at-leading-whitespace-p ()
@@ -1527,7 +1597,8 @@ Maps values to bar characters scaled min-to-max."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (let ((n (length touchtype--current-text)))
-        (when (< touchtype--pace-pos n)
+        (when (and (< touchtype--pace-pos n)
+                   touchtype--target-start)
           ;; Remove old overlay
           (when (overlayp touchtype--pace-overlay)
             (delete-overlay touchtype--pace-overlay))
@@ -1698,6 +1769,7 @@ Chart uses 8 rows matching the 8 levels of `touchtype-ui--bar-chars'."
 (defun touchtype-ui--align-table-before (start)
   "Align the org table that starts at or after buffer position START.
 Only aligns the first table found from START to `point'."
+  (require 'org-table)
   (save-excursion
     (goto-char start)
     (when (re-search-forward "^|" (point-max) t)
@@ -1807,7 +1879,8 @@ HEADING-LEVEL is the org heading depth."
   (let* ((stars (make-string heading-level ?*))
          (filtered (if mode
                        (cl-remove-if-not
-                        (lambda (s) (equal (plist-get (cdr s) :mode) (symbol-name mode)))
+                        (lambda (s) (touchtype-ui--mode-match-p
+                                     (plist-get (cdr s) :mode) mode))
                         sessions)
                      sessions)))
     (when (> (length filtered) 1)
@@ -1822,11 +1895,20 @@ HEADING-LEVEL is the org heading depth."
         (touchtype-ui--render-progress-chart chart-accs "Accuracy" "%")
         (insert "#+end_example\n\n")))))
 
+(defun touchtype-ui--as-symbol (x)
+  "Coerce X to a symbol.  X may be a symbol or a string."
+  (if (symbolp x) x (intern x)))
+
+(defun touchtype-ui--mode-match-p (session-mode mode-sym)
+  "Return non-nil if SESSION-MODE (string or symbol) matches MODE-SYM."
+  (eq (touchtype-ui--as-symbol session-mode) mode-sym))
+
 (defun touchtype-ui--get-all-modes ()
   "Return a list of mode symbols that have data in stats."
   (let ((mode-lstats (plist-get touchtype--stats :mode-letter-stats))
         (mode-bstats (plist-get touchtype--stats :mode-bigram-stats))
-        (session-modes (mapcar (lambda (s) (intern (plist-get (cdr s) :mode)))
+        (session-modes (mapcar (lambda (s)
+                                 (touchtype-ui--as-symbol (plist-get (cdr s) :mode)))
                                (plist-get touchtype--stats :sessions)))
         (modes nil))
     (dolist (entry mode-lstats)
@@ -1897,8 +1979,8 @@ HEADING-LEVEL is the org heading depth."
               (insert "* Per-Mode Breakdown\n\n")
               (dolist (m modes)
                 (let* ((mode-sessions (cl-remove-if-not
-                                       (lambda (s) (equal (plist-get (cdr s) :mode)
-                                                          (symbol-name m)))
+                                       (lambda (s) (touchtype-ui--mode-match-p
+                                                    (plist-get (cdr s) :mode) m))
                                        sessions))
                        (m-n (length mode-sessions))
                        (m-wpm (if (> m-n 0)

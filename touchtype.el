@@ -632,6 +632,40 @@ customize `touchtype-zen-mode' instead."
   (setq touchtype--zen-active t)
   (touchtype-ui-setup-buffer))
 
+;;;; Width and text-scale adjustments
+
+(defvar touchtype-width--transient-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "+") #'touchtype-grow-width)
+    (define-key map (kbd "=") #'touchtype-grow-width)
+    (define-key map (kbd "-") #'touchtype-shrink-width)
+    map)
+  "Transient keymap active after a width adjustment.
+Press +/= to grow or - to shrink.  Any other key exits.")
+
+(defun touchtype--activate-width-transient ()
+  "Activate the transient keymap for repeated width adjustments."
+  (set-transient-map touchtype-width--transient-map t))
+
+(defun touchtype-grow-width ()
+  "Increase `touchtype-text-width' by `touchtype-text-width-step'.
+After invoking, press +/= to keep growing or - to shrink."
+  (interactive)
+  (cl-incf touchtype-text-width touchtype-text-width-step)
+  (touchtype-ui--update-margins)
+  (touchtype--activate-width-transient)
+  (message "Text width: %d  (+/= grow, - shrink)" touchtype-text-width))
+
+(defun touchtype-shrink-width ()
+  "Decrease `touchtype-text-width' by `touchtype-text-width-step'.
+After invoking, press - to keep shrinking or +/= to grow.
+Width will not go below 20."
+  (interactive)
+  (setq touchtype-text-width (max 20 (- touchtype-text-width touchtype-text-width-step)))
+  (touchtype-ui--update-margins)
+  (touchtype--activate-width-transient)
+  (message "Text width: %d  (+/= grow, - shrink)" touchtype-text-width))
+
 ;;;###autoload
 (defalias 'touchtype-export #'touchtype-stats-export
   "Export typing statistics to a file.")

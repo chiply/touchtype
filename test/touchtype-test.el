@@ -2336,7 +2336,7 @@ as focus chars in generated lines."
   (let ((touchtype-mode-selection 'finger-drill)
         (touchtype--finger-selection 'left-index)
         (touchtype-keyboard-layout 'qwerty)
-        (touchtype-line-length 40)
+        (touchtype-text-width 40)
         (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz"))
     (let* ((allowed (touchtype-algo--finger-keys 'left-index))
            (line (touchtype-algo-generate-line)))
@@ -2347,9 +2347,9 @@ as focus chars in generated lines."
         (should (seq-contains-p allowed ch #'=))))))
 
 (ert-deftest touchtype-test-line-length-respected ()
-  "Generated lines should approximate touchtype-line-length."
+  "Generated lines should approximate touchtype-text-width."
   (let ((touchtype-mode-selection 'common-words)
-        (touchtype-line-length 40)
+        (touchtype-text-width 40)
         (touchtype--unlocked-keys "abcdefghijklmnopqrstuvwxyz"))
     (let ((line (touchtype-algo-generate-line)))
       (should (>= (length line) 30))
@@ -2378,7 +2378,7 @@ as focus chars in generated lines."
   (let ((touchtype-progressive-unlock t)
         (touchtype-mode-selection 'bigram-drill)
         (touchtype--unlocked-keys "therin")
-        (touchtype-line-length 40))
+        (touchtype-text-width 40))
     (dotimes (_ 10)
       (let ((line (touchtype-algo-bigram-line)))
         (dolist (ch (string-to-list line))
@@ -2390,7 +2390,7 @@ as focus chars in generated lines."
   (let ((touchtype-progressive-unlock nil)
         (touchtype-mode-selection 'bigram-drill)
         (touchtype--unlocked-keys "therin")
-        (touchtype-line-length 40))
+        (touchtype-text-width 40))
     (let* ((chars nil))
       (dotimes (_ 20)
         (let ((line (touchtype-algo-bigram-line)))
@@ -2533,7 +2533,7 @@ as focus chars in generated lines."
         (touchtype-mode-selection 'common-words)
         (touchtype--unlocked-keys "theansd")
         (touchtype-common-words-count 200)
-        (touchtype-line-length 40))
+        (touchtype-text-width 40))
     (let ((line (touchtype-algo-generate-line)))
       (should (stringp line))
       (should (> (length line) 0))
@@ -2547,7 +2547,7 @@ as focus chars in generated lines."
         (touchtype-mode-selection 'domain-words)
         (touchtype--unlocked-keys "stringaympe")
         (touchtype--domain-selection 'programming)
-        (touchtype-line-length 40))
+        (touchtype-text-width 40))
     (let ((line (touchtype-algo-generate-line)))
       (should (stringp line))
       (should (> (length line) 0))
@@ -2560,7 +2560,7 @@ as focus chars in generated lines."
   (let ((touchtype-progressive-unlock t)
         (touchtype-mode-selection 'weak-letters)
         (touchtype--unlocked-keys "fjdkslae")
-        (touchtype-line-length 40)
+        (touchtype-text-width 40)
         (touchtype-weak-letter-count 5)
         (touchtype--stats
          (list :version 1 :letter-stats nil :bigram-stats nil
@@ -2577,7 +2577,7 @@ as focus chars in generated lines."
   (let ((touchtype-progressive-unlock t)
         (touchtype-mode-selection 'weak-ngrams)
         (touchtype--unlocked-keys "therinasd")
-        (touchtype-line-length 40)
+        (touchtype-text-width 40)
         (touchtype--stats
          (list :version 1
                :letter-stats (list (list ?t :hits 50 :misses 10

@@ -194,7 +194,9 @@ When FORCE is nil and `touchtype--stats' is already loaded, do nothing."
     (let ((print-level nil)
           (print-length nil))
       ;; Write as (touchtype-stats :key val ...) so cdr is the raw plist.
-      (pp (cons 'touchtype-stats touchtype--stats) (current-buffer)))))
+      ;; Use prin1 instead of pp for speed (avoids slow pretty-printing).
+      (prin1 (cons 'touchtype-stats touchtype--stats) (current-buffer))
+      (insert "\n"))))
 
 ;;;; Recording keypresses
 
@@ -384,48 +386,41 @@ Inherits the optional MODE parameter.")
   "Return the N weakest bigrams sorted by confidence ascending.
 Only includes bigrams with at least 5 hits.  N defaults to 10.
 When MODE is non-nil, use per-mode bigram stats."
-  (unless touchtype--stats (touchtype-stats-load))
-  (let* ((n (or n 10))
-         (bstats (if mode
-                     (cdr (assq mode (plist-get touchtype--stats :mode-bigram-stats)))
-                   (plist-get touchtype--stats :bigram-stats)))
-         (qualified
-          (cl-remove-if-not
-           (lambda (entry)
-             (and (= (length (car entry)) 2)
-                  (>= (touchtype-stats--entry-get entry :hits) 5)))
-           bstats))
-         (sorted
-          (sort (copy-sequence qualified)
-                (lambda (a b)
-                  (< (touchtype-stats-get-bigram-confidence (car a) mode)
-                     (touchtype-stats-get-bigram-confidence (car b) mode))))))
-    (seq-take sorted n)))
+  (touchtype-stats-get-weak-ngrams 2 2 n mode))
 
 (defun touchtype-stats-get-weak-ngrams (min-len max-len &optional n mode)
   "Return the N weakest n-grams with string length between MIN-LEN and MAX-LEN.
 Only includes entries with at least 5 hits.  N defaults to 10.
 Sorted by confidence ascending.
-When MODE is non-nil, use per-mode bigram stats."
+When MODE is non-nil, use per-mode bigram stats.
+Uses a partial-sort approach: computes confidence once per entry and
+only keeps the N lowest, avoiding a full O(m log m) sort."
   (unless touchtype--stats (touchtype-stats-load))
   (let* ((n (or n 10))
          (bstats (if mode
                      (cdr (assq mode (plist-get touchtype--stats :mode-bigram-stats)))
                    (plist-get touchtype--stats :bigram-stats)))
-         (qualified
-          (cl-remove-if-not
-           (lambda (entry)
-             (let ((len (length (car entry))))
-               (and (>= len min-len)
-                    (<= len max-len)
-                    (>= (touchtype-stats--entry-get entry :hits) 5))))
-           bstats))
-         (sorted
-          (sort (copy-sequence qualified)
-                (lambda (a b)
-                  (< (touchtype-stats-get-bigram-confidence (car a) mode)
-                     (touchtype-stats-get-bigram-confidence (car b) mode))))))
-    (seq-take sorted n)))
+         ;; Build (confidence . entry) pairs, filtering and keeping only top N
+         (heap nil)
+         (heap-max 0.0)
+         (heap-len 0))
+    (dolist (entry bstats)
+      (let ((len (length (car entry))))
+        (when (and (>= len min-len)
+                   (<= len max-len)
+                   (>= (touchtype-stats--entry-get entry :hits) 5))
+          (let ((conf (touchtype-stats-get-bigram-confidence (car entry) mode)))
+            (cond
+             ((< heap-len n)
+              (push (cons conf entry) heap)
+              (cl-incf heap-len)
+              (when (> conf heap-max) (setq heap-max conf)))
+             ((< conf heap-max)
+              ;; Replace the max element
+              (setq heap (cl-delete-if (lambda (x) (= (car x) heap-max)) heap :count 1))
+              (push (cons conf entry) heap)
+              (setq heap-max (cl-reduce #'max heap :key #'car))))))))
+    (mapcar #'cdr (sort heap (lambda (a b) (< (car a) (car b)))))))
 
 (defun touchtype-stats-get-wpm-trend (&optional n mode)
   "Return the last N session WPM values, oldest first.
@@ -436,7 +431,10 @@ When MODE is non-nil, only include sessions with matching :mode."
          (all-sessions (plist-get touchtype--stats :sessions))
          (filtered (if mode
                        (cl-remove-if-not
-                        (lambda (s) (equal (plist-get (cdr s) :mode) (symbol-name mode)))
+                        (lambda (s) (eq (if (symbolp (plist-get (cdr s) :mode))
+                                                    (plist-get (cdr s) :mode)
+                                                  (intern (plist-get (cdr s) :mode)))
+                                                mode))
                         all-sessions)
                      all-sessions))
          (sessions (seq-take filtered n)))
@@ -451,7 +449,10 @@ When MODE is non-nil, only include sessions with matching :mode."
          (all-sessions (plist-get touchtype--stats :sessions))
          (filtered (if mode
                        (cl-remove-if-not
-                        (lambda (s) (equal (plist-get (cdr s) :mode) (symbol-name mode)))
+                        (lambda (s) (eq (if (symbolp (plist-get (cdr s) :mode))
+                                                    (plist-get (cdr s) :mode)
+                                                  (intern (plist-get (cdr s) :mode)))
+                                                mode))
                         all-sessions)
                      all-sessions))
          (sessions (seq-take filtered n)))
