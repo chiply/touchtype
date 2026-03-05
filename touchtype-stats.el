@@ -1003,6 +1003,29 @@ METRIC is a keyword like :wpm or :accuracy.  Returns nil if no sessions."
       (insert content))
     (message "Stats exported to %s" filename)))
 
+;;;; Global percentile estimation
+
+(defun touchtype-stats-wpm-percentile (wpm)
+  "Return the approximate percentile ranking for WPM.
+Uses linear interpolation between entries in
+`touchtype--wpm-percentile-table'.  Returns a float 0-100."
+  (let ((table touchtype--wpm-percentile-table)
+        (prev-wpm 0)
+        (prev-pct 0.0))
+    (catch 'done
+      (dolist (entry table)
+        (let ((entry-wpm (car entry))
+              (entry-pct (cdr entry)))
+          (when (<= wpm entry-wpm)
+            (if (= entry-wpm prev-wpm)
+                (throw 'done entry-pct)
+              (let* ((ratio (/ (- wpm prev-wpm) (float (- entry-wpm prev-wpm)))))
+                (throw 'done (+ prev-pct (* ratio (- entry-pct prev-pct)))))))
+          (setq prev-wpm entry-wpm
+                prev-pct entry-pct)))
+      ;; Beyond the table: return highest percentile
+      prev-pct)))
+
 (provide 'touchtype-stats)
 
 ;;; touchtype-stats.el ends here
