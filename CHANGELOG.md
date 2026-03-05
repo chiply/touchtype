@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/chiply/touchtype/compare/v0.1.10...v0.1.11) (2026-03-05)
+
+
+### Features
+
+* centered text with word-wrap, flowing text, and jit-lock fix ([91beafa](https://github.com/chiply/touchtype/commit/91beafae640709514ada53b377d1677a7ae648f7))
+
 ## [0.1.10](https://github.com/chiply/touchtype/compare/v0.1.9...v0.1.10) (2026-03-05)
 
 
