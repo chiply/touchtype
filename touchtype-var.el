@@ -218,6 +218,18 @@ For per-session zen mode, use `touchtype-zen' instead."
   :type 'boolean
   :group 'touchtype)
 
+(defcustom touchtype-highlight-mode nil
+  "Highlight upcoming text to guide eye movement.
+`word': highlight the current word.
+`next-word': highlight the next word.
+`next-two': highlight the next two words.
+nil: no highlighting (default)."
+  :type '(choice (const :tag "Off" nil)
+                 (const :tag "Current word" word)
+                 (const :tag "Next word" next-word)
+                 (const :tag "Next two words" next-two))
+  :group 'touchtype)
+
 (defcustom touchtype-sound-enabled nil
   "When non-nil, play audio feedback on keypresses."
   :type 'boolean
@@ -252,6 +264,9 @@ This is buffer-local and reset each session.")
   "Cached result of `touchtype-stats-get-weak-ngrams' for line generation.
 Set once at session start, cleared on session end.  Avoids re-sorting
 thousands of bigram entries on every new line.")
+
+(defvar touchtype--highlight-overlays nil
+  "List of overlays used for focus/highlight mode.")
 
 (defvar touchtype--session-wpm-timeseries nil
   "List of (ELAPSED-SECONDS . WPM) pairs sampled every second during a session.
@@ -337,6 +352,15 @@ Includes a background so mistyped spaces are visible."
 (defface touchtype-face-status
   '((t :inherit mode-line-inactive))
   "Face for the status line at the bottom of the touchtype buffer."
+  :group 'touchtype)
+
+(defface touchtype-face-highlight
+  '((((class color) (background dark))
+     :foreground "#e0e0e0" :weight bold)
+    (((class color) (background light))
+     :foreground "#1a1a1a" :weight bold)
+    (t :weight bold))
+  "Face for highlighted upcoming words in focus mode."
   :group 'touchtype)
 
 (defface touchtype-face-pace-caret

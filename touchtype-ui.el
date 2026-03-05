@@ -197,7 +197,8 @@ Optional _FRAME argument is accepted for `window-size-change-functions'."
                        touchtype--weak-ngrams-cache
                        touchtype--valid-words-cache
                        touchtype--session-wpm-timeseries
-                       touchtype--wpm-sample-timer))
+                       touchtype--wpm-sample-timer
+                       touchtype--highlight-overlays))
           (make-local-variable sym))
         ;; Load persisted state (force re-read from disk)
         (touchtype-stats-load t)
@@ -438,7 +439,67 @@ packages render the cursor there rather than at the end of the buffer."
     ;; mode that uses point for cursor display) doesn't wander elsewhere.
     (when (and touchtype--target-start (> n 0))
       (goto-char (+ (marker-position touchtype--target-start)
-                    (min pos (1- n)))))))
+                    (min pos (1- n)))))
+    ;; Update focus/highlight overlays
+    (touchtype-ui--update-highlight-overlays)))
+
+(defun touchtype-ui--update-highlight-overlays ()
+  "Update focus/highlight overlays based on cursor position and mode."
+  ;; Clear existing highlights
+  (dolist (ov touchtype--highlight-overlays)
+    (when (overlayp ov) (delete-overlay ov)))
+  (setq touchtype--highlight-overlays nil)
+  (when (and touchtype-highlight-mode
+             touchtype--current-text
+             touchtype--target-start
+             touchtype--char-overlays)
+    (let* ((text touchtype--current-text)
+           (pos touchtype--cursor-pos)
+           (n (length text))
+           (base (marker-position touchtype--target-start))
+           (regions nil))
+      ;; Find word boundaries from cursor position
+      (cl-flet ((word-at (start)
+                  "Return (BEG . END) of the word starting at or after START."
+                  (let ((beg start))
+                    ;; Skip spaces
+                    (while (and (< beg n) (= (aref text beg) ?\s))
+                      (cl-incf beg))
+                    (when (< beg n)
+                      (let ((end beg))
+                        (while (and (< end n) (/= (aref text end) ?\s))
+                          (cl-incf end))
+                        (cons beg end))))))
+        (pcase touchtype-highlight-mode
+          ('word
+           ;; Highlight current word
+           (let ((word (word-at pos)))
+             (when word (push word regions))))
+          ('next-word
+           ;; Find end of current word, then next word
+           (let ((cur-end pos))
+             (while (and (< cur-end n) (/= (aref text cur-end) ?\s))
+               (cl-incf cur-end))
+             (let ((next (word-at cur-end)))
+               (when next (push next regions)))))
+          ('next-two
+           ;; Find next two words
+           (let ((cur-end pos))
+             (while (and (< cur-end n) (/= (aref text cur-end) ?\s))
+               (cl-incf cur-end))
+             (let ((w1 (word-at cur-end)))
+               (when w1
+                 (push w1 regions)
+                 (let ((w2 (word-at (cdr w1))))
+                   (when w2 (push w2 regions)))))))))
+      ;; Create overlays for highlighted regions
+      (dolist (region regions)
+        (let* ((beg (+ base (car region)))
+               (end (+ base (cdr region)))
+               (ov (make-overlay beg end)))
+          (overlay-put ov 'face 'touchtype-face-highlight)
+          (overlay-put ov 'priority 2)
+          (push ov touchtype--highlight-overlays))))))
 
 (defun touchtype-ui--update-typed-char (pos _char face)
   "Apply FACE to the overlay at POS in the target text.
@@ -465,6 +526,9 @@ Call before erasing the buffer to prevent stale marker errors."
   (when touchtype--pace-overlay
     (delete-overlay touchtype--pace-overlay)
     (setq touchtype--pace-overlay nil))
+  (dolist (ov touchtype--highlight-overlays)
+    (when (overlayp ov) (delete-overlay ov)))
+  (setq touchtype--highlight-overlays nil)
   (when (vectorp touchtype--char-overlays)
     (dotimes (i (length touchtype--char-overlays))
       (when-let* ((ov (aref touchtype--char-overlays i)))
