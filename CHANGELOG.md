@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.9](https://github.com/chiply/touchtype/compare/v0.1.8...v0.1.9) (2026-03-05)
+
+
+### Bug Fixes
+
+* end-session stats buffer rendering and interaction bugs ([32a199c](https://github.com/chiply/touchtype/commit/32a199c264c882e505a11d384fb4101594a1d4f3))
+* use C-c C-r/C-c C-q bindings to satisfy package-lint ([c20c6e4](https://github.com/chiply/touchtype/commit/c20c6e43ad6370bfd6f7b9f8255a6a7b32a031af))
+
 ## [0.1.8](https://github.com/chiply/touchtype/compare/v0.1.7...v0.1.8) (2026-03-04)
 
 
