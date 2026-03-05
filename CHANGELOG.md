@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/chiply/touchtype/compare/v0.1.9...v0.1.10) (2026-03-05)
+
+
+### Features
+
+* per-mode stats breakdown, performance optimizations, and multiple UX improvements ([f33921b](https://github.com/chiply/touchtype/commit/f33921bc7388ae0f4eebf5dc8a77d1cda63c3e3d))
+
 ## [0.1.9](https://github.com/chiply/touchtype/compare/v0.1.8...v0.1.9) (2026-03-05)
 
 
