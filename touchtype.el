@@ -582,3 +582,4 @@ Width will not go below 20."
 (provide 'touchtype)
 
 ;;; touchtype.el ends here
+
