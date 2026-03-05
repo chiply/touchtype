@@ -111,13 +111,13 @@ at the start, to survive deferred hooks from Evil, org-mode, etc."
 (define-derived-mode touchtype-results-mode org-mode "Touchtype-Results"
   "Major mode for touchtype end-session results.
 Inherits `org-mode' and adds touchtype-specific bindings."
-  (define-key touchtype-results-mode-map (kbd "C-c r") #'touchtype-ui--restart-session)
-  (define-key touchtype-results-mode-map (kbd "C-c q") #'touchtype-ui--quit))
+  (define-key touchtype-results-mode-map (kbd "C-c C-r") #'touchtype-ui--restart-session)
+  (define-key touchtype-results-mode-map (kbd "C-c C-q") #'touchtype-ui--quit))
 
 (define-derived-mode touchtype-stats-mode org-mode "Touchtype-Stats"
   "Major mode for touchtype statistics view.
 Inherits `org-mode' and adds touchtype-specific bindings."
-  (define-key touchtype-stats-mode-map (kbd "C-c q") #'kill-current-buffer))
+  (define-key touchtype-stats-mode-map (kbd "C-c C-q") #'kill-current-buffer))
 
 ;;;; Buffer setup
 
@@ -1349,7 +1349,7 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
                 (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.65)) " "
                 (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.8)) " "
                 (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 1.0)) " high\n"))
-      (insert "\n~TAB: fold/unfold  C-c r: restart  C-c q: quit~\n"))
+      (insert "\n~TAB: fold/unfold  C-c C-r: restart  C-c C-q: quit~\n"))
     (touchtype-results-mode)
     (let ((inhibit-read-only t))
       (org-table-map-tables #'org-table-align t))
