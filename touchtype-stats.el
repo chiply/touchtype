@@ -49,6 +49,11 @@
 Loaded from `touchtype-stats-file' by `touchtype-stats-load' and
 written back by `touchtype-stats-save'.")
 
+(defvar touchtype--confidence-cache nil
+  "When non-nil, a hash-table memoizing confidence scores.
+Bound dynamically during render passes to avoid recomputing
+the same (char . mode) confidence values hundreds of times.")
+
 ;;;; Word stats helpers
 
 (defun touchtype-stats--word-entry (word)
@@ -118,10 +123,12 @@ written back by `touchtype-stats-save'.")
 
 ;;;; Load / Save
 
-(defun touchtype-stats-load ()
+(defun touchtype-stats-load (&optional force)
   "Load stats from `touchtype-stats-file' into `touchtype--stats'.
-If the file does not exist, initialise with an empty stats plist."
-  (if (file-readable-p touchtype-stats-file)
+If the file does not exist, initialise with an empty stats plist.
+When FORCE is nil and `touchtype--stats' is already loaded, do nothing."
+  (unless (and touchtype--stats (not force))
+    (if (file-readable-p touchtype-stats-file)
       (with-temp-buffer
         (insert-file-contents touchtype-stats-file)
         (goto-char (point-min))
@@ -176,7 +183,7 @@ If the file does not exist, initialise with an empty stats plist."
                 :confidence nil
                 :streak-freezes-available touchtype-streak-freeze-count
                 :streak-best 0
-                :streak-consecutive-days 0))))
+                :streak-consecutive-days 0)))))
 
 (defun touchtype-stats-save ()
   "Write `touchtype--stats' to `touchtype-stats-file'."
@@ -282,24 +289,59 @@ Formula (keybr-derived):
 
 Returns 0.0 when no data is available."
   (unless touchtype--stats (touchtype-stats-load))
+  (let ((cache-key (when touchtype--confidence-cache (cons char mode))))
+    (if (and cache-key (gethash cache-key touchtype--confidence-cache))
+        (gethash cache-key touchtype--confidence-cache)
+      (let* ((lstats (if mode
+                         (cdr (assq mode (plist-get touchtype--stats :mode-letter-stats)))
+                       (plist-get touchtype--stats :letter-stats)))
+             (entry  (assq char lstats))
+             (hits   (if entry (touchtype-stats--entry-get entry :hits)   0))
+             (misses (if entry (touchtype-stats--entry-get entry :misses) 0))
+             (result
+              (if (zerop hits)
+                  0.0
+                (let* ((total-ms     (touchtype-stats--entry-get entry :total-ms))
+                       (ema-ms       (touchtype-stats--entry-get entry :ema-ms))
+                       (target-ms    (/ 60000.0 (* touchtype-target-wpm 5)))
+                       (avg-ms       (if (and touchtype-confidence-use-ema ema-ms)
+                                         ema-ms
+                                       (/ (float total-ms) hits)))
+                       (speed-conf   (min 1.0 (/ target-ms avg-ms)))
+                       (accuracy     (/ (float hits) (+ hits misses)))
+                       (sample-scale (min 1.0 (/ (float hits) touchtype-confidence-min-samples))))
+                  (* accuracy speed-conf sample-scale)))))
+        (when cache-key
+          (puthash cache-key result touchtype--confidence-cache))
+        result))))
+
+(defun touchtype-stats-get-letter-accuracy (char &optional mode)
+  "Return the accuracy (0.0-1.0) for CHAR, or 0.0 if no data.
+When MODE is non-nil, use per-mode letter stats."
+  (unless touchtype--stats (touchtype-stats-load))
   (let* ((lstats (if mode
                      (cdr (assq mode (plist-get touchtype--stats :mode-letter-stats)))
                    (plist-get touchtype--stats :letter-stats)))
-         (entry  (assq char lstats))
-         (hits   (if entry (touchtype-stats--entry-get entry :hits)   0))
+         (entry (assq char lstats))
+         (hits (if entry (touchtype-stats--entry-get entry :hits) 0))
          (misses (if entry (touchtype-stats--entry-get entry :misses) 0)))
     (if (zerop hits)
         0.0
-      (let* ((total-ms     (touchtype-stats--entry-get entry :total-ms))
-             (ema-ms       (touchtype-stats--entry-get entry :ema-ms))
-             (target-ms    (/ 60000.0 (* touchtype-target-wpm 5)))
-             (avg-ms       (if (and touchtype-confidence-use-ema ema-ms)
-                               ema-ms
-                             (/ (float total-ms) hits)))
-             (speed-conf   (min 1.0 (/ target-ms avg-ms)))
-             (accuracy     (/ (float hits) (+ hits misses)))
-             (sample-scale (min 1.0 (/ (float hits) touchtype-confidence-min-samples))))
-        (* accuracy speed-conf sample-scale)))))
+      (/ (float hits) (+ hits misses)))))
+
+(defun touchtype-stats-get-bigram-accuracy (bigram &optional mode)
+  "Return the accuracy (0.0-1.0) for BIGRAM string, or 0.0 if no data.
+When MODE is non-nil, use per-mode bigram stats."
+  (unless touchtype--stats (touchtype-stats-load))
+  (let* ((bstats (if mode
+                     (cdr (assq mode (plist-get touchtype--stats :mode-bigram-stats)))
+                   (plist-get touchtype--stats :bigram-stats)))
+         (entry (assoc bigram bstats))
+         (hits (if entry (touchtype-stats--entry-get entry :hits) 0))
+         (misses (if entry (touchtype-stats--entry-get entry :misses) 0)))
+    (if (zerop hits)
+        0.0
+      (/ (float hits) (+ hits misses)))))
 
 (defun touchtype-stats-get-bigram-confidence (bigram &optional mode)
   "Compute confidence score 0.0-1.0 for BIGRAM string.
@@ -307,24 +349,31 @@ When MODE is non-nil, use per-mode bigram stats instead of global.
 Uses the same formula as `touchtype-stats-get-confidence' but
 applied to bigram-stats entries."
   (unless touchtype--stats (touchtype-stats-load))
-  (let* ((bstats (if mode
-                     (cdr (assq mode (plist-get touchtype--stats :mode-bigram-stats)))
-                   (plist-get touchtype--stats :bigram-stats)))
-         (entry  (assoc bigram bstats))
-         (hits   (if entry (touchtype-stats--entry-get entry :hits)   0))
-         (misses (if entry (touchtype-stats--entry-get entry :misses) 0)))
-    (if (zerop hits)
-        0.0
-      (let* ((total-ms     (touchtype-stats--entry-get entry :total-ms))
-             (ema-ms       (touchtype-stats--entry-get entry :ema-ms))
-             (target-ms    (/ 60000.0 (* touchtype-target-wpm 5)))
-             (avg-ms       (if (and touchtype-confidence-use-ema ema-ms)
-                               ema-ms
-                             (/ (float total-ms) hits)))
-             (speed-conf   (min 1.0 (/ target-ms avg-ms)))
-             (accuracy     (/ (float hits) (+ hits misses)))
-             (sample-scale (min 1.0 (/ (float hits) touchtype-confidence-min-samples))))
-        (* accuracy speed-conf sample-scale)))))
+  (let ((cache-key (when touchtype--confidence-cache (cons bigram mode))))
+    (if (and cache-key (gethash cache-key touchtype--confidence-cache))
+        (gethash cache-key touchtype--confidence-cache)
+      (let* ((bstats (if mode
+                         (cdr (assq mode (plist-get touchtype--stats :mode-bigram-stats)))
+                       (plist-get touchtype--stats :bigram-stats)))
+             (entry  (assoc bigram bstats))
+             (hits   (if entry (touchtype-stats--entry-get entry :hits)   0))
+             (misses (if entry (touchtype-stats--entry-get entry :misses) 0))
+             (result
+              (if (zerop hits)
+                  0.0
+                (let* ((total-ms     (touchtype-stats--entry-get entry :total-ms))
+                       (ema-ms       (touchtype-stats--entry-get entry :ema-ms))
+                       (target-ms    (/ 60000.0 (* touchtype-target-wpm 5)))
+                       (avg-ms       (if (and touchtype-confidence-use-ema ema-ms)
+                                         ema-ms
+                                       (/ (float total-ms) hits)))
+                       (speed-conf   (min 1.0 (/ target-ms avg-ms)))
+                       (accuracy     (/ (float hits) (+ hits misses)))
+                       (sample-scale (min 1.0 (/ (float hits) touchtype-confidence-min-samples))))
+                  (* accuracy speed-conf sample-scale)))))
+        (when cache-key
+          (puthash cache-key result touchtype--confidence-cache))
+        result))))
 
 (defalias 'touchtype-stats-get-ngram-confidence #'touchtype-stats-get-bigram-confidence
   "Alias for `touchtype-stats-get-bigram-confidence'.
@@ -378,20 +427,34 @@ When MODE is non-nil, use per-mode bigram stats."
                      (touchtype-stats-get-bigram-confidence (car b) mode))))))
     (seq-take sorted n)))
 
-(defun touchtype-stats-get-wpm-trend (&optional n)
+(defun touchtype-stats-get-wpm-trend (&optional n mode)
   "Return the last N session WPM values, oldest first.
-N defaults to `touchtype-stats-history-length'."
+N defaults to `touchtype-stats-history-length'.
+When MODE is non-nil, only include sessions with matching :mode."
   (unless touchtype--stats (touchtype-stats-load))
   (let* ((n (or n touchtype-stats-history-length))
-         (sessions (seq-take (plist-get touchtype--stats :sessions) n)))
+         (all-sessions (plist-get touchtype--stats :sessions))
+         (filtered (if mode
+                       (cl-remove-if-not
+                        (lambda (s) (equal (plist-get (cdr s) :mode) (symbol-name mode)))
+                        all-sessions)
+                     all-sessions))
+         (sessions (seq-take filtered n)))
     (nreverse (mapcar (lambda (s) (plist-get (cdr s) :wpm)) sessions))))
 
-(defun touchtype-stats-get-accuracy-trend (&optional n)
+(defun touchtype-stats-get-accuracy-trend (&optional n mode)
   "Return the last N session accuracy values, oldest first.
-N defaults to `touchtype-stats-history-length'."
+N defaults to `touchtype-stats-history-length'.
+When MODE is non-nil, only include sessions with matching :mode."
   (unless touchtype--stats (touchtype-stats-load))
   (let* ((n (or n touchtype-stats-history-length))
-         (sessions (seq-take (plist-get touchtype--stats :sessions) n)))
+         (all-sessions (plist-get touchtype--stats :sessions))
+         (filtered (if mode
+                       (cl-remove-if-not
+                        (lambda (s) (equal (plist-get (cdr s) :mode) (symbol-name mode)))
+                        all-sessions)
+                     all-sessions))
+         (sessions (seq-take filtered n)))
     (nreverse (mapcar (lambda (s) (plist-get (cdr s) :accuracy)) sessions))))
 
 (defun touchtype-stats-get-trend-direction (values)
@@ -471,8 +534,8 @@ Only includes words with at least 5 hits.  N defaults to 20."
          (qualified
           (cl-remove-if-not
            (lambda (entry)
-             (and (>= (length (car entry)) 3)
-                  (>= (touchtype-stats--entry-get entry :hits) 5)))
+             (and (>= (length (car entry)) 4)
+                  (>= (touchtype-stats--entry-get entry :hits) 2)))
            wstats))
          (sorted
           (sort (copy-sequence qualified)

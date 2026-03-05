@@ -71,7 +71,7 @@ installs command remaps as a safety net for minor-mode bindings."
       (define-key map (vector 'remap cmd)
                   #'touchtype-ui--handle-word-backspace))
     (define-key map (kbd "TAB") #'touchtype-ui--handle-tab)
-    (define-key map (kbd "RET") #'touchtype-ui--ignore-key)
+    (define-key map (kbd "RET") #'touchtype-ui--handle-return)
     (define-key map (kbd "C-g") #'touchtype-ui--quit)
     (define-key map (kbd "C-c C-p") #'touchtype-ui--toggle-pause)
     map))
@@ -168,10 +168,13 @@ Inherits `org-mode' and adds touchtype-specific bindings."
                        touchtype--pause-overlay
                        touchtype--word-streak
                        touchtype--best-word-streak
-                       touchtype--perfect-line-achieved))
+                       touchtype--perfect-line-achieved
+                       touchtype--session-key-stats
+                       touchtype--zen-active
+                       touchtype--session-ending))
           (make-local-variable sym))
-        ;; Load persisted state
-        (touchtype-stats-load)
+        ;; Load persisted state (force re-read from disk)
+        (touchtype-stats-load t)
         (setq touchtype--unlocked-keys (touchtype-stats-get-unlocked-keys))
         (setq touchtype--session-wpm-samples nil
               touchtype--session-errors      0
@@ -194,7 +197,8 @@ Inherits `org-mode' and adds touchtype-specific bindings."
               touchtype--pause-overlay       nil
               touchtype--word-streak         0
               touchtype--best-word-streak    0
-              touchtype--perfect-line-achieved nil)
+              touchtype--perfect-line-achieved nil
+              touchtype--session-key-stats (make-hash-table :test 'eql))
         (setq touchtype-ui--keymap (touchtype-ui--make-keymap))
         (use-local-map touchtype-ui--keymap)
         (setq-local cursor-type nil)
@@ -267,10 +271,10 @@ session budget so the user never sees words they won't type."
                (downcase word) word-correct word-ms)
               (setq char-idx (+ char-idx (length word) 1))))))))
   ;; Word budget: each line costs its actual word count.
-  ;; nil means unlimited (timed mode).
+  ;; nil means unlimited (timed mode, quote mode).
   (let ((budget (when (and (eq touchtype-session-type 'words)
-                         (not (touchtype-algo--quote-in-progress-p)))
-                (- touchtype-session-length touchtype--session-word-count))))
+                           (not (eq touchtype-mode-selection 'quote)))
+                  (- touchtype-session-length touchtype--session-word-count))))
     (if (and touchtype--preview-texts (> (length touchtype--preview-texts) 0))
         ;; Shift from preview
         (progn
@@ -364,7 +368,7 @@ Completed lines appear above the active line."
     (insert "\n")
     ;; Status line
     (setq touchtype--status-start (point-marker))
-    (unless touchtype-zen-mode
+    (unless (or touchtype-zen-mode touchtype--zen-active)
       (insert (touchtype-ui--status-string))
       (insert "\n"))
     ;; Cursor underline on first character
@@ -409,7 +413,7 @@ _CHAR is accepted for API compatibility but unused."
 
 (defun touchtype-ui--update-status ()
   "Rewrite the status area in place."
-  (unless touchtype-zen-mode
+  (unless (or touchtype-zen-mode touchtype--zen-active)
     (let ((inhibit-read-only t))
       (save-excursion
         (goto-char (marker-position touchtype--status-start))
@@ -704,6 +708,15 @@ Shows SESSION FAILED header and records :failed t in session."
       (setq touchtype--last-key-time now)
       ;; Record the keypress in stats
       (touchtype-stats-record-keypress char correct-p elapsed touchtype-mode-selection)
+      ;; Track per-key accuracy for session-level heatmap
+      (when (and (/= char ?\s) touchtype--session-key-stats)
+        (let* ((key (downcase char))
+               (entry (gethash key touchtype--session-key-stats)))
+          (if entry
+              (progn (cl-incf (car entry))
+                     (unless correct-p (cl-incf (cdr entry))))
+            (puthash key (cons 1 (if correct-p 0 1))
+                     touchtype--session-key-stats))))
       ;; Record bigram if we have a previous char
       (when (> pos 0)
         (let ((prev-char (aref text (1- pos))))
@@ -786,9 +799,10 @@ Shows SESSION FAILED header and records :failed t in session."
     (touchtype-ui--update-cursor-overlay)
     (touchtype-ui--update-status)))
 
-(defun touchtype-ui--ignore-key ()
-  "Silently ignore a key (used for RET)."
-  (interactive))
+(defun touchtype-ui--handle-return ()
+  "Handle RET by treating it as a space for line advancement."
+  (interactive)
+  (touchtype-ui--process-char ?\s))
 
 (defun touchtype-ui--quit ()
   "Save stats and quit the touchtype session."
@@ -852,6 +866,10 @@ Shows SESSION FAILED header and records :failed t in session."
     (ignore n-correct n-total)
     ;; Check session end (only for word-count mode; timed mode ends via timer)
     (cond
+     ;; Deferred end: timed session expired while quote was in progress
+     ((and touchtype--session-ending
+           (not (touchtype-algo--quote-in-progress-p)))
+      (touchtype-ui--end-session))
      ;; Word-count target reached
      ((and (eq touchtype-session-type 'words)
            (>= touchtype--session-word-count touchtype-session-length))
@@ -1119,7 +1137,8 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
   ;; Cancel any active timers
   (touchtype-ui--cancel-session-timer)
   (touchtype-ui--stop-pace-caret)
-  (let* ((total-keys  touchtype--session-total-keys)
+  (let* ((touchtype--confidence-cache (make-hash-table :test 'equal))
+         (total-keys  touchtype--session-total-keys)
          (total-errs  touchtype--session-errors)
          (corrections touchtype--session-corrections)
          (raw-elapsed (if touchtype--session-start-time
@@ -1226,68 +1245,74 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
             (insert (format "- %s\n" msg)))))
       ;; Speed
       (insert "\n** Speed\n")
-      (insert "| Metric    |  Value |\n")
-      (insert "|-----------+--------|\n")
-      (insert (format "| Net WPM   | %6.1f |\n" net-wpm))
-      (insert (format "| Gross WPM | %6.1f |\n" gross-wpm))
-      (insert (format "| Net CPM   | %6d |\n" (round (* net-wpm 5))))
-      (insert (format "| Gross CPM | %6d |\n" (round (* gross-wpm 5))))
+      (let ((tbl-start (point)))
+        (insert "| Metric    |  Value |\n")
+        (insert "|-----------+--------|\n")
+        (insert (format "| Net WPM   | %6.1f |\n" net-wpm))
+        (insert (format "| Gross WPM | %6.1f |\n" gross-wpm))
+        (insert (format "| Net CPM   | %6d |\n" (round (* net-wpm 5))))
+        (insert (format "| Gross CPM | %6d |\n" (round (* gross-wpm 5))))
+        (touchtype-ui--align-table-before tbl-start))
       ;; Accuracy
       (insert "\n** Accuracy\n")
-      (insert "| Metric       |  Value |\n")
-      (insert "|--------------+--------|\n")
-      (insert (format "| Accuracy     | %5.1f%% |\n" accuracy))
-      (insert (format "| Raw Accuracy | %5.1f%% |\n" raw-acc))
+      (let ((tbl-start (point)))
+        (insert "| Metric       |  Value |\n")
+        (insert "|--------------+--------|\n")
+        (insert (format "| Accuracy     | %5.1f%% |\n" accuracy))
+        (insert (format "| Raw Accuracy | %5.1f%% |\n" raw-acc))
+        (touchtype-ui--align-table-before tbl-start))
       ;; Session details
       (insert "\n** Session\n")
-      (insert "| Metric      | Value |\n")
-      (insert "|-------------+-------|\n")
-      (insert (format "| Time        | %d:%02d |\n" time-min time-sec))
-      (insert (format "| Words       | %d |\n" touchtype--session-word-count))
-      (insert (format "| Characters  | %d |\n" total-keys))
-      (insert (format "| Corrections | %d |\n" corrections))
-      (insert (format "| Uncorrected | %d |\n" uncorrected))
-      (insert (format "| Consistency | %.0f%% |\n" consistency))
-      (when (> touchtype--best-word-streak 0)
-        (insert (format "| Best Streak | %d words |\n" touchtype--best-word-streak)))
-      ;; WPM sparkline
-      (when (>= (length line-wpms) 2)
-        (let* ((wpms (reverse line-wpms))
-               (sparkline (touchtype-ui--wpm-sparkline wpms)))
-          (insert (format "| WPM Graph   | %s (%.0f–%.0f) |\n"
-                          sparkline
-                          (apply #'min wpms)
-                          (apply #'max wpms)))))
-      ;; Streak and practice time
-      (let ((streak (touchtype-stats-get-streak))
-            (total-secs (touchtype-stats-get-total-practice-time))
-            (freezes (touchtype-stats-get-streak-freezes))
-            (best-streak (touchtype-stats-get-best-streak)))
-        (insert (format "| Streak      | %d day%s |\n" streak (if (= streak 1) "" "s")))
-        (when (> best-streak streak)
-          (insert (format "| Best Streak | %d days |\n" best-streak)))
-        (insert (format "| Freezes     | %d |\n" freezes))
-        (insert (format "| Total Time  | %s |\n" (touchtype-ui--format-duration total-secs))))
-      ;; XP and level display
-      (let* ((xp-to-next (touchtype-stats-xp-to-next-level))
-             (level-title (aref touchtype--level-titles
-                                (min new-level (1- (length touchtype--level-titles)))))
-             (breakdown (touchtype-stats-xp-breakdown
-                         net-wpm accuracy touchtype--session-word-count
-                         :streak streak :is-pb is-pb
-                         :difficulty touchtype-difficulty
-                         :consistency consistency
-                         :accuracy-perfect (>= accuracy 100)))
-             (total-mult (plist-get breakdown :total-mult)))
-        (if (and touchtype-xp-multipliers-enabled (> total-mult 1.0))
-            (insert (format "| XP          | +%d (base %d x %.2f) Level %d: %s |\n"
-                            session-xp (plist-get breakdown :base)
-                            total-mult new-level level-title))
-          (insert (format "| XP          | +%s Level %d: %s |\n"
-                          (number-to-string session-xp)
-                          new-level level-title)))
-        (let ((xp-bar (touchtype-ui--xp-progress-bar)))
-          (insert (format "| Progress    | %s |\n" xp-bar))))
+      (let ((tbl-start (point)))
+        (insert "| Metric      | Value |\n")
+        (insert "|-------------+-------|\n")
+        (insert (format "| Time        | %d:%02d |\n" time-min time-sec))
+        (insert (format "| Words       | %d |\n" touchtype--session-word-count))
+        (insert (format "| Characters  | %d |\n" total-keys))
+        (insert (format "| Corrections | %d |\n" corrections))
+        (insert (format "| Uncorrected | %d |\n" uncorrected))
+        (insert (format "| Consistency | %.0f%% |\n" consistency))
+        (when (> touchtype--best-word-streak 0)
+          (insert (format "| Best Streak | %d words |\n" touchtype--best-word-streak)))
+        ;; WPM sparkline
+        (when (>= (length line-wpms) 2)
+          (let* ((wpms (reverse line-wpms))
+                 (sparkline (touchtype-ui--wpm-sparkline wpms)))
+            (insert (format "| WPM Graph   | %s (%.0f–%.0f) |\n"
+                            sparkline
+                            (apply #'min wpms)
+                            (apply #'max wpms)))))
+        ;; Streak and practice time
+        (let ((streak (touchtype-stats-get-streak))
+              (total-secs (touchtype-stats-get-total-practice-time))
+              (freezes (touchtype-stats-get-streak-freezes))
+              (best-streak (touchtype-stats-get-best-streak)))
+          (insert (format "| Streak      | %d day%s |\n" streak (if (= streak 1) "" "s")))
+          (when (> best-streak streak)
+            (insert (format "| Best Streak | %d days |\n" best-streak)))
+          (insert (format "| Freezes     | %d |\n" freezes))
+          (insert (format "| Total Time  | %s |\n" (touchtype-ui--format-duration total-secs))))
+        ;; XP and level display
+        (let* ((xp-to-next (touchtype-stats-xp-to-next-level))
+               (level-title (aref touchtype--level-titles
+                                  (min new-level (1- (length touchtype--level-titles)))))
+               (breakdown (touchtype-stats-xp-breakdown
+                           net-wpm accuracy touchtype--session-word-count
+                           :streak streak :is-pb is-pb
+                           :difficulty touchtype-difficulty
+                           :consistency consistency
+                           :accuracy-perfect (>= accuracy 100)))
+               (total-mult (plist-get breakdown :total-mult)))
+          (if (and touchtype-xp-multipliers-enabled (> total-mult 1.0))
+              (insert (format "| XP          | +%d (base %d x %.2f) Level %d: %s |\n"
+                              session-xp (plist-get breakdown :base)
+                              total-mult new-level level-title))
+            (insert (format "| XP          | +%s Level %d: %s |\n"
+                            (number-to-string session-xp)
+                            new-level level-title)))
+          (let ((xp-bar (touchtype-ui--xp-progress-bar)))
+            (insert (format "| Progress    | %s |\n" xp-bar))))
+        (touchtype-ui--align-table-before tbl-start))
       ;; Session delta (vs rolling average)
       (let ((avg-wpm (touchtype-stats-get-rolling-average
                       touchtype-rolling-average-window :wpm))
@@ -1309,21 +1334,29 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
       (let ((mode-label (symbol-name mode)))
         (when all-weak-letters
           (insert (format "\n** Weakest Letters (%s)\n" mode-label))
-          (insert "| Letter | Confidence |\n")
-          (insert "|--------+------------|\n")
-          (dolist (ch all-weak-letters)
-            (insert (format "| %c      |       %.2f |\n"
-                            ch (touchtype-stats-get-confidence ch mode)))))
+          (let ((tbl-start (point)))
+            (insert "| Letter | Accuracy | Confidence |\n")
+            (insert "|--------+----------+------------|\n")
+            (dolist (ch all-weak-letters)
+              (insert (format "| %c      |     %.0f%% |       %.2f |\n"
+                              ch
+                              (* 100 (touchtype-stats-get-letter-accuracy ch mode))
+                              (touchtype-stats-get-confidence ch mode))))
+            (touchtype-ui--align-table-before tbl-start)))
         (when all-weak-ngrams
           (insert (format "\n** Weakest N-grams (%s)\n" mode-label))
-          (insert "| N-gram | Confidence |\n")
-          (insert "|--------+------------|\n")
-          (dolist (entry all-weak-ngrams)
-            (insert (format "| %-6s |       %.2f |\n"
-                            (car entry)
-                            (touchtype-stats-get-bigram-confidence
-                             (car entry) mode))))))
-      ;; Keyboard heatmap
+          (let ((tbl-start (point)))
+            (insert "| N-gram | Accuracy | Confidence |\n")
+            (insert "|--------+----------+------------|\n")
+            (dolist (entry all-weak-ngrams)
+              (insert (format "| %-6s |     %.0f%% |       %.2f |\n"
+                              (car entry)
+                              (* 100 (touchtype-stats-get-bigram-accuracy
+                                      (car entry) mode))
+                              (touchtype-stats-get-bigram-confidence
+                               (car entry) mode))))
+            (touchtype-ui--align-table-before tbl-start))))
+      ;; Keyboard heatmap (session-level accuracy)
       (insert "\n** Keyboard Heatmap\n")
       (let* ((rows (pcase touchtype-keyboard-layout
                      ('qwerty  touchtype--qwerty-keyboard-rows)
@@ -1331,13 +1364,19 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
                      ('colemak touchtype--colemak-keyboard-rows)
                      ('workman touchtype--workman-keyboard-rows)
                      (_        touchtype--qwerty-keyboard-rows)))
-             (indents '("  " "   " "    ")))
+             (indents '("  " "   " "    "))
+             (key-stats touchtype--session-key-stats))
         (cl-loop for row in rows
                  for indent in indents
                  do (insert indent)
                  do (dotimes (i (length row))
                       (let* ((ch (aref row i))
-                             (conf (touchtype-stats-get-confidence ch))
+                             (entry (when key-stats
+                                      (gethash (downcase ch) key-stats)))
+                             (conf (if entry
+                                       (/ (float (- (car entry) (cdr entry)))
+                                          (car entry))
+                                     0.0))
                              (face (touchtype-ui--heatmap-face conf)))
                         (insert (propertize (format "[%c]" ch) 'font-lock-face face))))
                  do (insert "\n"))
@@ -1351,8 +1390,6 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
                 (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 1.0)) " high\n"))
       (insert "\n~TAB: fold/unfold  C-c C-r: restart  C-c C-q: quit~\n"))
     (touchtype-results-mode)
-    (let ((inhibit-read-only t))
-      (org-table-map-tables #'org-table-align t))
     (setq buffer-read-only t)
     (touchtype-ui--goto-top)))))
 
@@ -1431,11 +1468,14 @@ Omits zero-valued leading components."
     (setq touchtype--session-timer nil)))
 
 (defun touchtype-ui--timed-session-expire (buf)
-  "Called when a timed session expires in BUF."
+  "Called when a timed session expires in BUF.
+If a quote is still in progress, defer the end until the quote finishes."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (setq touchtype--session-timer nil)
-      (touchtype-ui--end-session))))
+      (if (touchtype-algo--quote-in-progress-p)
+          (setq touchtype--session-ending t)
+        (touchtype-ui--end-session)))))
 
 ;;;; WPM sparkline
 
@@ -1538,22 +1578,25 @@ Uses a continuous color gradient from red (low) through yellow to green (high)."
   (let ((color (touchtype-ui--heatmap-color confidence)))
     (list :foreground color :weight 'bold)))
 
-(defun touchtype-ui--render-keyboard-heatmap ()
-  "Insert a keyboard heatmap showing per-key confidence with color coding."
+(defun touchtype-ui--render-keyboard-heatmap (&optional mode heading-level)
+  "Insert a keyboard heatmap showing per-key confidence with color coding.
+When MODE is non-nil, use per-mode confidence.
+HEADING-LEVEL is the org heading depth (default 1)."
   (let* ((rows (pcase touchtype-keyboard-layout
                  ('qwerty  touchtype--qwerty-keyboard-rows)
                  ('dvorak  touchtype--dvorak-keyboard-rows)
                  ('colemak touchtype--colemak-keyboard-rows)
                  ('workman touchtype--workman-keyboard-rows)
                  (_        touchtype--qwerty-keyboard-rows)))
-         (indents '("  " "   " "    ")))
-    (insert "* Keyboard Heatmap\n")
+         (indents '("  " "   " "    "))
+         (stars (make-string (or heading-level 1) ?*)))
+    (insert (format "%s Keyboard Heatmap\n" stars))
     (cl-loop for row in rows
              for indent in indents
              do (insert indent)
              do (dotimes (i (length row))
                   (let* ((ch (aref row i))
-                         (conf (touchtype-stats-get-confidence ch))
+                         (conf (touchtype-stats-get-confidence ch mode))
                          (face (touchtype-ui--heatmap-face conf)))
                     (insert (propertize (format "[%c]" ch) 'font-lock-face face))))
              do (insert "\n"))
@@ -1577,19 +1620,21 @@ Uses a continuous color gradient from red (low) through yellow to green (high)."
                       (or (null entry) (= (plist-get (cdr entry) :hits) 0))))
                   finger-order)
         (insert "(not enough data yet)\n")
-      (insert "| Finger    | Accuracy | Bar                  | Avg ms | Hits |\n")
-      (insert "|-----------+----------+----------------------+--------+------|\n")
-      (dolist (finger finger-order)
-        (let* ((entry (assq finger finger-stats))
-               (name (cdr (assq finger touchtype--finger-names)))
-               (hits (if entry (plist-get (cdr entry) :hits) 0))
-               (accuracy (if entry (plist-get (cdr entry) :accuracy) 0.0))
-               (avg-ms (if entry (plist-get (cdr entry) :avg-ms) 0.0)))
-          (when (> hits 0)
-            (insert (format "| %-9s | %6.1f%% | %s | %6.0f | %4d |\n"
-                            name accuracy
-                            (touchtype-ui--ascii-bar accuracy 100.0 touchtype-ui--bar-width)
-                            avg-ms hits)))))))
+      (let ((tbl-start (point)))
+        (insert "| Finger    | Accuracy | Bar                  | Avg ms | Hits |\n")
+        (insert "|-----------+----------+----------------------+--------+------|\n")
+        (dolist (finger finger-order)
+          (let* ((entry (assq finger finger-stats))
+                 (name (cdr (assq finger touchtype--finger-names)))
+                 (hits (if entry (plist-get (cdr entry) :hits) 0))
+                 (accuracy (if entry (plist-get (cdr entry) :accuracy) 0.0))
+                 (avg-ms (if entry (plist-get (cdr entry) :avg-ms) 0.0)))
+            (when (> hits 0)
+              (insert (format "| %-9s | %6.1f%% | %s | %6.0f | %4d |\n"
+                              name accuracy
+                              (touchtype-ui--ascii-bar accuracy 100.0 touchtype-ui--bar-width)
+                              avg-ms hits)))))
+        (touchtype-ui--align-table-before tbl-start))))
   (insert "\n"))
 
 ;;;; Progress charts
@@ -1648,6 +1693,150 @@ Chart uses 8 rows matching the 8 levels of `touchtype-ui--bar-chars'."
           (insert "\n")))
       (insert "\n"))))
 
+;;;; Stats view helpers
+
+(defun touchtype-ui--align-table-before (start)
+  "Align the org table that starts at or after buffer position START.
+Only aligns the first table found from START to `point'."
+  (save-excursion
+    (goto-char start)
+    (when (re-search-forward "^|" (point-max) t)
+      (org-table-align))))
+
+(defun touchtype-ui--render-letter-table (mode heading-level)
+  "Insert a per-letter stats table.
+MODE is nil for global, or a symbol for per-mode stats.
+HEADING-LEVEL is the org heading depth."
+  (let* ((stars (make-string heading-level ?*))
+         (lstats (if mode
+                     (cdr (assq mode (plist-get touchtype--stats :mode-letter-stats)))
+                   (plist-get touchtype--stats :letter-stats)))
+         (weak (touchtype-stats-get-weak-letters mode))
+         (has-data nil)
+         (tbl-start (point)))
+    (insert (format "%s Letter Stats\n" stars))
+    (setq tbl-start (point))
+    (dolist (ch weak)
+      (let* ((entry (assq ch lstats))
+             (hits  (if entry (touchtype-stats--entry-get entry :hits) 0))
+             (acc   (touchtype-stats-get-letter-accuracy ch mode))
+             (conf  (touchtype-stats-get-confidence ch mode)))
+        (when (> hits 0)
+          (unless has-data
+            (insert "| Letter | Accuracy | Confidence | Bar                  | Hits |\n")
+            (insert "|--------+----------+------------+----------------------+------|\n")
+            (setq has-data t))
+          (insert (format "| %c      |     %.0f%% | %10.2f | %s | %4d |\n"
+                          ch (* 100 acc) conf
+                          (touchtype-ui--ascii-bar conf 1.0 touchtype-ui--bar-width)
+                          hits)))))
+    (when has-data
+      (touchtype-ui--align-table-before tbl-start))
+    (unless has-data
+      (insert "(not enough data yet)\n"))
+    (insert "\n")))
+
+(defun touchtype-ui--render-ngram-table (mode heading-level)
+  "Insert an n-gram stats table.
+MODE is nil for global, or a symbol for per-mode stats.
+HEADING-LEVEL is the org heading depth."
+  (let* ((stars (make-string heading-level ?*))
+         (weak-ngrams (touchtype-stats-get-weak-ngrams 2 4 10 mode)))
+    (insert (format "%s Weakest N-grams\n" stars))
+    (if (null weak-ngrams)
+        (insert "(not enough data yet)\n")
+      (let ((tbl-start (point)))
+        (insert "| N-gram | Accuracy | Confidence | Bar                  | Hits |\n")
+        (insert "|--------+----------+------------+----------------------+------|\n")
+        (dolist (entry weak-ngrams)
+          (let* ((ng   (car entry))
+                 (acc  (touchtype-stats-get-bigram-accuracy ng mode))
+                 (conf (touchtype-stats-get-bigram-confidence ng mode))
+                 (hits (touchtype-stats--entry-get entry :hits)))
+            (insert (format "| %-6s |     %.0f%% | %10.2f | %s | %4d |\n"
+                            ng (* 100 acc) conf
+                            (touchtype-ui--ascii-bar conf 1.0 touchtype-ui--bar-width)
+                            hits))))
+        (touchtype-ui--align-table-before tbl-start)))
+    (insert "\n")))
+
+(defun touchtype-ui--render-trends (mode heading-level)
+  "Insert trend analysis (WPM and accuracy).
+MODE is nil for global, or a symbol for per-mode stats.
+HEADING-LEVEL is the org heading depth."
+  (let* ((stars (make-string heading-level ?*))
+         (wpm-trend (touchtype-stats-get-wpm-trend nil mode))
+         (acc-trend (touchtype-stats-get-accuracy-trend nil mode))
+         (wpm-dir   (touchtype-stats-get-trend-direction wpm-trend))
+         (acc-dir   (touchtype-stats-get-trend-direction acc-trend))
+         (dir-char  (lambda (d) (pcase d
+                                  ('improving "↑")
+                                  ('declining "↓")
+                                  (_          "→")))))
+    (insert (format "%s Trends\n" stars))
+    (if (null wpm-trend)
+        (insert "(no sessions recorded yet)\n")
+      (insert (format "- WPM trend (%s): %s\n"
+                      (funcall dir-char wpm-dir)
+                      (mapconcat (lambda (v) (format "%.0f" v))
+                                 wpm-trend " → ")))
+      (let ((wpm-max (apply #'max wpm-trend)))
+        (insert "#+begin_example\n")
+        (cl-loop for v in wpm-trend
+                 for i from 1
+                 do (insert (format "  %2d. %s %.0f\n"
+                                    i (touchtype-ui--ascii-bar v wpm-max 15) v)))
+        (insert "#+end_example\n"))
+      (insert (format "- Acc trend (%s): %s\n"
+                      (funcall dir-char acc-dir)
+                      (mapconcat (lambda (v) (format "%.0f%%" v))
+                                 acc-trend " → ")))
+      (let ((acc-max 100.0))
+        (insert "#+begin_example\n")
+        (cl-loop for v in acc-trend
+                 for i from 1
+                 do (insert (format "  %2d. %s %.0f%%\n"
+                                    i (touchtype-ui--ascii-bar v acc-max 15) v)))
+        (insert "#+end_example\n")))
+    (insert "\n")))
+
+(defun touchtype-ui--render-progress (sessions mode heading-level)
+  "Insert progress charts for SESSIONS.
+MODE is nil for global, or a symbol for per-mode filtering.
+HEADING-LEVEL is the org heading depth."
+  (let* ((stars (make-string heading-level ?*))
+         (filtered (if mode
+                       (cl-remove-if-not
+                        (lambda (s) (equal (plist-get (cdr s) :mode) (symbol-name mode)))
+                        sessions)
+                     sessions)))
+    (when (> (length filtered) 1)
+      (let* ((chart-sessions (seq-take filtered touchtype-stats-progress-length))
+             (chart-wpms (nreverse (mapcar (lambda (s) (plist-get (cdr s) :wpm))
+                                            chart-sessions)))
+             (chart-accs (nreverse (mapcar (lambda (s) (plist-get (cdr s) :accuracy))
+                                            chart-sessions))))
+        (insert (format "%s Progress\n" stars))
+        (insert "#+begin_example\n")
+        (touchtype-ui--render-progress-chart chart-wpms "WPM" "")
+        (touchtype-ui--render-progress-chart chart-accs "Accuracy" "%")
+        (insert "#+end_example\n\n")))))
+
+(defun touchtype-ui--get-all-modes ()
+  "Return a list of mode symbols that have data in stats."
+  (let ((mode-lstats (plist-get touchtype--stats :mode-letter-stats))
+        (mode-bstats (plist-get touchtype--stats :mode-bigram-stats))
+        (session-modes (mapcar (lambda (s) (intern (plist-get (cdr s) :mode)))
+                               (plist-get touchtype--stats :sessions)))
+        (modes nil))
+    (dolist (entry mode-lstats)
+      (cl-pushnew (car entry) modes))
+    (dolist (entry mode-bstats)
+      (cl-pushnew (car entry) modes))
+    (dolist (m session-modes)
+      (cl-pushnew m modes))
+    (sort modes (lambda (a b) (string< (symbol-name a) (symbol-name b))))))
+
 ;;;; Stats view
 
 (defun touchtype-ui-show-stats ()
@@ -1657,7 +1846,8 @@ Chart uses 8 rows matching the 8 levels of `touchtype-ui--bar-chars'."
       (let ((inhibit-read-only t))
         (erase-buffer)
         (touchtype-stats-load)
-        (let* ((letter-stats (plist-get touchtype--stats :letter-stats))
+        (let* ((touchtype--confidence-cache (make-hash-table :test 'equal))
+               (letter-stats (plist-get touchtype--stats :letter-stats))
                (sessions     (plist-get touchtype--stats :sessions))
                (n-sessions   (length sessions))
                (total-words  (cl-reduce #'+ sessions
@@ -1675,7 +1865,8 @@ Chart uses 8 rows matching the 8 levels of `touchtype-ui--bar-chars'."
           ;; 1. Overall summary
           (insert "* Overall Summary\n")
           (let ((streak (touchtype-stats-get-streak))
-                (total-secs (touchtype-stats-get-total-practice-time)))
+                (total-secs (touchtype-stats-get-total-practice-time))
+                (tbl-start (point)))
             (insert "| Metric         | Value |\n")
             (insert "|----------------+-------|\n")
             (insert (format "| Sessions       | %d |\n" n-sessions))
@@ -1685,130 +1876,70 @@ Chart uses 8 rows matching the 8 levels of `touchtype-ui--bar-chars'."
             (insert (format "| Streak         | %d day%s |\n"
                             streak (if (= streak 1) "" "s")))
             (insert (format "| Total Practice | %s |\n"
-                            (touchtype-ui--format-duration total-secs))))
+                            (touchtype-ui--format-duration total-secs)))
+            (touchtype-ui--align-table-before tbl-start))
           (insert "\n")
-          ;; 1b. Keyboard heatmap
-          (touchtype-ui--render-keyboard-heatmap)
-          ;; 2. Per-letter confidence
-          (insert "* Per-Letter Confidence\n")
-          (let ((has-data nil))
-            (dolist (ch (touchtype-stats-get-weak-letters))
-              (let* ((entry (assq ch letter-stats))
-                     (hits  (if entry (touchtype-stats--entry-get entry :hits) 0))
-                     (conf  (touchtype-stats-get-confidence ch)))
-                (when (> hits 0)
-                  (unless has-data
-                    (insert "| Letter | Confidence | Bar                  | Hits |\n")
-                    (insert "|--------+------------+----------------------+------|\n")
-                    (setq has-data t))
-                  (insert (format "| %c      | %10.2f | %s | %4d |\n"
-                                  ch conf
-                                  (touchtype-ui--ascii-bar conf 1.0 touchtype-ui--bar-width)
-                                  hits)))))
-            (unless has-data
-              (insert "(not enough data yet)\n")))
-          ;; 2b. Per-Mode Confidence
-          (let ((mode-lstats (plist-get touchtype--stats :mode-letter-stats)))
-            (when mode-lstats
-              (insert "\n* Per-Mode Confidence\n")
-              (dolist (mode-entry mode-lstats)
-                (let* ((m (car mode-entry))
-                       (m-letters (cdr mode-entry)))
-                  (when m-letters
-                    (insert (format "** %s\n" m))
-                    (let ((weak (seq-take
-                                 (sort (cl-remove-if
-                                        (lambda (ch)
-                                          (<= (touchtype-stats-get-confidence ch m) 0.0))
-                                        (touchtype-stats-get-weak-letters m))
-                                       (lambda (a b)
-                                         (< (touchtype-stats-get-confidence a m)
-                                            (touchtype-stats-get-confidence b m))))
-                                 10))
-                          (has-data nil))
-                      (dolist (ch weak)
-                        (let* ((entry (assq ch m-letters))
-                               (hits  (if entry (touchtype-stats--entry-get entry :hits) 0))
-                               (conf  (touchtype-stats-get-confidence ch m)))
-                          (when (> hits 0)
-                            (unless has-data
-                              (insert "| Letter | Confidence | Bar                  | Hits |\n")
-                              (insert "|--------+------------+----------------------+------|\n")
-                              (setq has-data t))
-                            (insert (format "| %c      | %10.2f | %s | %4d |\n"
-                                            ch conf
-                                            (touchtype-ui--ascii-bar conf 1.0 touchtype-ui--bar-width)
-                                            hits)))))))))))
-          ;; 2c. Per-finger performance
-          (insert "\n")
+          ;; 1b. Global keyboard heatmap
+          (touchtype-ui--render-keyboard-heatmap nil 1)
+          ;; 2. Global per-letter stats
+          (touchtype-ui--render-letter-table nil 1)
+          ;; 2b. Per-finger performance
           (touchtype-ui--render-finger-stats)
-          ;; 3. Weakest N-grams
-          (insert "* Weakest N-grams\n")
-          (let ((weak-ngrams (touchtype-stats-get-weak-ngrams 2 4 10)))
-            (if (null weak-ngrams)
-                (insert "(not enough data yet)\n")
-              (insert "| N-gram | Confidence | Bar                  | Hits |\n")
-              (insert "|--------+------------+----------------------+------|\n")
-              (dolist (entry weak-ngrams)
-                (let* ((ng   (car entry))
-                       (conf (touchtype-stats-get-bigram-confidence ng))
-                       (hits (touchtype-stats--entry-get entry :hits)))
-                  (insert (format "| %-6s | %10.2f | %s | %4d |\n"
-                                  ng conf
-                                  (touchtype-ui--ascii-bar conf 1.0 touchtype-ui--bar-width)
-                                  hits))))))
-          ;; 4. Trends
-          (insert "\n* Trends\n")
-          (let* ((wpm-trend (touchtype-stats-get-wpm-trend))
-                 (acc-trend (touchtype-stats-get-accuracy-trend))
-                 (wpm-dir   (touchtype-stats-get-trend-direction wpm-trend))
-                 (acc-dir   (touchtype-stats-get-trend-direction acc-trend))
-                 (dir-char  (lambda (d) (pcase d
-                                          ('improving "↑")
-                                          ('declining "↓")
-                                          (_          "→")))))
-            (if (null wpm-trend)
-                (insert "(no sessions recorded yet)\n")
-              (insert (format "- WPM trend (%s): %s\n"
-                              (funcall dir-char wpm-dir)
-                              (mapconcat (lambda (v) (format "%.0f" v))
-                                         wpm-trend " → ")))
-              (let ((wpm-max (apply #'max wpm-trend)))
-                (insert "#+begin_example\n")
-                (cl-loop for v in wpm-trend
-                         for i from 1
-                         do (insert (format "  %2d. %s %.0f\n"
-                                            i (touchtype-ui--ascii-bar v wpm-max 15) v)))
-                (insert "#+end_example\n"))
-              (insert (format "- Acc trend (%s): %s\n"
-                              (funcall dir-char acc-dir)
-                              (mapconcat (lambda (v) (format "%.0f%%" v))
-                                         acc-trend " → ")))
-              (let ((acc-max 100.0))
-                (insert "#+begin_example\n")
-                (cl-loop for v in acc-trend
-                         for i from 1
-                         do (insert (format "  %2d. %s %.0f%%\n"
-                                            i (touchtype-ui--ascii-bar v acc-max 15) v)))
-                (insert "#+end_example\n"))))
-          ;; 4b. Progress charts
-          (when (> n-sessions 1)
-            (insert "\n* Progress\n")
-            (let* ((chart-sessions (seq-take sessions touchtype-stats-progress-length))
-                   (chart-wpms (nreverse (mapcar (lambda (s) (plist-get (cdr s) :wpm))
-                                                  chart-sessions)))
-                   (chart-accs (nreverse (mapcar (lambda (s) (plist-get (cdr s) :accuracy))
-                                                  chart-sessions))))
-              (insert "#+begin_example\n")
-              (touchtype-ui--render-progress-chart chart-wpms "WPM" "")
-              (touchtype-ui--render-progress-chart chart-accs "Accuracy" "%")
-              (insert "#+end_example\n")))
-          ;; 5. Session history
+          ;; 3. Global weakest N-grams
+          (touchtype-ui--render-ngram-table nil 1)
+          ;; 4. Global trends
+          (touchtype-ui--render-trends nil 1)
+          ;; 4b. Global progress charts
+          (touchtype-ui--render-progress sessions nil 1)
+          ;; 5. Per-mode breakdowns
+          (let ((modes (touchtype-ui--get-all-modes)))
+            (when modes
+              (insert "* Per-Mode Breakdown\n\n")
+              (dolist (m modes)
+                (let* ((mode-sessions (cl-remove-if-not
+                                       (lambda (s) (equal (plist-get (cdr s) :mode)
+                                                          (symbol-name m)))
+                                       sessions))
+                       (m-n (length mode-sessions))
+                       (m-wpm (if (> m-n 0)
+                                  (/ (cl-reduce #'+ mode-sessions
+                                                :key (lambda (s) (plist-get (cdr s) :wpm))
+                                                :initial-value 0.0)
+                                     (float m-n))
+                                0.0))
+                       (m-acc (if (> m-n 0)
+                                  (/ (cl-reduce #'+ mode-sessions
+                                                :key (lambda (s) (plist-get (cdr s) :accuracy))
+                                                :initial-value 0.0)
+                                     (float m-n))
+                                0.0)))
+                  (insert (format "** %s\n" (symbol-name m)))
+                  ;; Mode summary
+                  (let ((tbl-start (point)))
+                    (insert "| Metric       | Value |\n")
+                    (insert "|--------------+-------|\n")
+                    (insert (format "| Sessions     | %d |\n" m-n))
+                    (insert (format "| Avg WPM      | %.1f |\n" m-wpm))
+                    (insert (format "| Avg Accuracy | %.1f%% |\n" m-acc))
+                    (touchtype-ui--align-table-before tbl-start))
+                  (insert "\n")
+                  ;; Mode heatmap
+                  (touchtype-ui--render-keyboard-heatmap m 3)
+                  ;; Mode letter stats
+                  (touchtype-ui--render-letter-table m 3)
+                  ;; Mode n-grams
+                  (touchtype-ui--render-ngram-table m 3)
+                  ;; Mode trends
+                  (touchtype-ui--render-trends m 3)
+                  ;; Mode progress
+                  (touchtype-ui--render-progress sessions m 3)))))
+          ;; 6. Session history
           (insert "\n* Session History\n")
           (let ((recent (seq-take sessions touchtype-stats-history-length)))
             (if (null recent)
                 (insert "(no sessions recorded yet)\n")
-              (let ((max-wpm (apply #'max (mapcar (lambda (s) (plist-get (cdr s) :wpm)) recent))))
+              (let ((max-wpm (apply #'max (mapcar (lambda (s) (plist-get (cdr s) :wpm)) recent)))
+                    (tbl-start (point)))
                 (insert "| Date | WPM | Bar                  | Accuracy | Mode | Words |\n")
                 (insert "|------+-----+----------------------+----------+------+-------|\n")
                 (dolist (s recent)
@@ -1819,13 +1950,15 @@ Chart uses 8 rows matching the 8 levels of `touchtype-ui--bar-chars'."
                                     (touchtype-ui--ascii-bar wpm max-wpm touchtype-ui--bar-width)
                                     (plist-get (cdr s) :accuracy)
                                     (plist-get (cdr s) :mode)
-                                    (plist-get (cdr s) :words))))))))
+                                    (plist-get (cdr s) :words)))))
+                (touchtype-ui--align-table-before tbl-start))))
           ;; 7. Personal Bests
           (insert "\n* Personal Bests\n")
           (let ((bests (touchtype-stats-get-all-personal-bests)))
             (if (null bests)
                 (insert "(no sessions recorded yet)\n")
-              (let ((max-wpm (apply #'max (mapcar (lambda (e) (or (plist-get (cdr e) :wpm) 0.0)) bests))))
+              (let ((max-wpm (apply #'max (mapcar (lambda (e) (or (plist-get (cdr e) :wpm) 0.0)) bests)))
+                    (tbl-start (point)))
                 (insert "| Mode | WPM | Bar                  | Accuracy |\n")
                 (insert "|------+-----+----------------------+----------|\n")
                 (dolist (entry bests)
@@ -1835,7 +1968,8 @@ Chart uses 8 rows matching the 8 levels of `touchtype-ui--bar-chars'."
                     (insert (format "| %s | %.1f | %s | %.1f%% |\n"
                                     mode best-wpm
                                     (touchtype-ui--ascii-bar best-wpm max-wpm touchtype-ui--bar-width)
-                                    best-acc)))))))
+                                    best-acc))))
+                (touchtype-ui--align-table-before tbl-start))))
           ;; 8. XP / Level
           (let* ((xp (touchtype-stats-get-xp))
                  (level (touchtype-stats-get-level))
@@ -1847,17 +1981,19 @@ Chart uses 8 rows matching the 8 levels of `touchtype-ui--bar-chars'."
             (when (> to-next 0)
               (insert (format " — %d XP to next level" to-next)))
             (insert "\n\n")
-            (insert "| # | Status | Title | XP Required |\n")
-            (insert "|---+--------+-------+-------------|\n")
-            (dotimes (i (length touchtype--xp-level-thresholds))
-              (let* ((lvl-title (aref touchtype--level-titles
-                                      (min i (1- (length touchtype--level-titles)))))
-                     (lvl-xp (aref touchtype--xp-level-thresholds i))
-                     (marker (cond ((< i level) "✓")
-                                   ((= i level) "►")
-                                   (t ""))))
-                (insert (format "| %d | %s | %s | %d |\n"
-                                (1+ i) marker lvl-title lvl-xp)))))
+            (let ((tbl-start (point)))
+              (insert "| # | Status | Title | XP Required |\n")
+              (insert "|---+--------+-------+-------------|\n")
+              (dotimes (i (length touchtype--xp-level-thresholds))
+                (let* ((lvl-title (aref touchtype--level-titles
+                                        (min i (1- (length touchtype--level-titles)))))
+                       (lvl-xp (aref touchtype--xp-level-thresholds i))
+                       (marker (cond ((< i level) "✓")
+                                     ((= i level) "►")
+                                     (t ""))))
+                  (insert (format "| %d | %s | %s | %d |\n"
+                                  (1+ i) marker lvl-title lvl-xp))))
+              (touchtype-ui--align-table-before tbl-start)))
           ;; 9. Achievements
           (insert "\n* Achievements\n")
           (let ((earned (touchtype-stats-get-achievements)))
@@ -1870,8 +2006,6 @@ Chart uses 8 rows matching the 8 levels of `touchtype-ui--bar-chars'."
                                 (if got "X" " ") name desc))))))
         (insert "\n"))
       (touchtype-stats-mode)
-      (let ((inhibit-read-only t))
-        (org-table-map-tables #'org-table-align t))
       (setq buffer-read-only t))
     (switch-to-buffer buf)
     (touchtype-ui--goto-top)))

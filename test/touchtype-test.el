@@ -2249,14 +2249,14 @@ as focus chars in generated lines."
                :mode-letter-stats nil :mode-bigram-stats nil
                :word-stats (list (list "hello" :hits 50 :misses 0 :total-ms 25000)
                                  (list "world" :hits 20 :misses 10 :total-ms 10000)
-                                 (list "the" :hits 10 :misses 8 :total-ms 5000)
-                                 (list "rare" :hits 3 :misses 2 :total-ms 1500))
+                                 (list "rare" :hits 3 :misses 2 :total-ms 1500)
+                                 (list "the" :hits 10 :misses 8 :total-ms 5000))
                :sessions nil :unlocked-keys "fj" :confidence nil)))
-    ;; "rare" has <5 hits, should be excluded
+    ;; "the" has <4 chars, should be excluded
     (let ((weak (touchtype-stats-get-weak-words 10)))
       (should (= 3 (length weak)))
-      ;; "the" has worst confidence (10/18 = 0.55), then "world" (20/30 = 0.67)
-      (should (equal "the" (caar weak))))))
+      ;; "rare" has worst confidence (3/5 = 0.60), then "world" (20/30 = 0.67)
+      (should (equal "rare" (caar weak))))))
 
 (ert-deftest touchtype-test-weak-words-line-cold-start ()
   "Weak-words line should fall back to common words with no word stats."
@@ -2357,18 +2357,19 @@ as focus chars in generated lines."
       (should (<= (length line) 80)))))
 
 (ert-deftest touchtype-test-weak-words-filters-short ()
-  "Weak words should not return words shorter than 3 characters."
+  "Weak words should not return words shorter than 4 characters."
   (let ((touchtype--stats
          (list :version 3 :letter-stats nil :bigram-stats nil
                :mode-letter-stats nil :mode-bigram-stats nil
                :word-stats (list (list "it" :hits 50 :misses 40 :total-ms 5000)
                                  (list "the" :hits 50 :misses 40 :total-ms 5000)
-                                 (list "a" :hits 50 :misses 45 :total-ms 5000))
+                                 (list "a" :hits 50 :misses 45 :total-ms 5000)
+                                 (list "four" :hits 50 :misses 40 :total-ms 5000))
                :sessions nil :unlocked-keys "fj" :confidence nil)))
     (let ((weak (touchtype-stats-get-weak-words 10)))
-      ;; "it" and "a" should be filtered out (< 3 chars)
+      ;; "it", "the", and "a" should be filtered out (< 4 chars)
       (should (= 1 (length weak)))
-      (should (equal "the" (car (car weak)))))))
+      (should (equal "four" (car (car weak)))))))
 
 ;;; ─── Progressive n-gram tests ───────────────────────────────────────────────
 
@@ -3254,6 +3255,13 @@ as focus chars in generated lines."
   (let ((touchtype-zen-mode t)
         (touchtype--status-start nil))
     ;; Should not error even with nil status-start because it returns early
+    (touchtype-ui--update-status)))
+
+(ert-deftest touchtype-test-zen-active-update-status-noop ()
+  "update-status is a no-op when per-session zen is active."
+  (let ((touchtype-zen-mode nil)
+        (touchtype--zen-active t)
+        (touchtype--status-start nil))
     (touchtype-ui--update-status)))
 
 (provide 'touchtype-test)

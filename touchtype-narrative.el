@@ -29,6 +29,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'ucs-normalize)
 (require 'url)
 (require 'touchtype-var)
 
@@ -144,6 +145,9 @@ picks one at random, and truncates at a sentence boundary if needed."
     (setq chosen (replace-regexp-in-string "\u2014" "--" chosen))
     (setq chosen (replace-regexp-in-string "\u2013" "-" chosen))
     (setq chosen (replace-regexp-in-string "\u2026" "..." chosen))
+    ;; Strip accents: decompose to NFD, remove combining diacritical marks
+    (setq chosen (ucs-normalize-NFD-string chosen))
+    (setq chosen (replace-regexp-in-string "[\u0300-\u036f]" "" chosen))
     ;; Collapse whitespace to single spaces and trim
     (setq chosen (replace-regexp-in-string "[\n\r\t]+" " " chosen))
     (setq chosen (replace-regexp-in-string "  +" " " chosen))

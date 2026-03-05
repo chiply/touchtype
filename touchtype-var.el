@@ -203,10 +203,15 @@ With fewer hits, confidence is scaled down proportionally."
   :group 'touchtype)
 
 (defcustom touchtype-zen-mode nil
-  "When non-nil, hide the status line during typing sessions.
-Stats are still tracked and shown at session end."
+  "When non-nil, always hide the status line during typing sessions.
+Stats are still tracked and shown at session end.
+For per-session zen mode, use `touchtype-zen' instead."
   :type 'boolean
   :group 'touchtype)
+
+(defvar touchtype--zen-active nil
+  "Non-nil when the current session was started via `touchtype-zen'.
+This is buffer-local and reset each session.")
 
 (defcustom touchtype-stats-progress-length 40
   "Number of recent sessions to display in progress charts."

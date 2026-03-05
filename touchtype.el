@@ -624,10 +624,12 @@ With prefix ARG, set the duration in seconds."
 ;;;###autoload
 (defun touchtype-zen (&optional arg)
   "Start a touchtype session in zen mode (no status line).
-With prefix ARG, set session length to that number of words."
+With prefix ARG, set session length to that number of words.
+Zen mode applies only to this session; for persistent zen mode,
+customize `touchtype-zen-mode' instead."
   (interactive "P")
   (touchtype--apply-prefix-arg arg)
-  (setq touchtype-zen-mode t)
+  (setq touchtype--zen-active t)
   (touchtype-ui-setup-buffer))
 
 ;;;###autoload

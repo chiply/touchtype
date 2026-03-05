@@ -638,8 +638,10 @@ Pick focus chars from the bottom N letters weighted by inverse confidence."
 
 (defun touchtype-algo--weak-words-line ()
   "Generate a line from the user's weakest words.
-Falls back to common-words if no word stats exist."
-  (let* ((weak (touchtype-stats-get-weak-words 20))
+Falls back to common-words if no word stats exist.
+Uses a pool of up to 50 weak words and avoids repeating the same
+word consecutively."
+  (let* ((weak (touchtype-stats-get-weak-words 50))
          (weak-words (mapcar #'car weak)))
     (if (null weak-words)
         ;; Cold start: fall back to common-words behavior
@@ -651,16 +653,22 @@ Falls back to common-words if no word stats exist."
               (push w words)
               (cl-incf total-len (1+ (length w)))))
           (mapconcat #'identity (nreverse words) " "))
-      ;; Weight by inverse confidence
+      ;; Weight by inverse confidence; avoid consecutive repeats
       (let* ((weighted (mapcar (lambda (w)
                                  (cons w (max 0.01 (- 1.0 (touchtype-stats-get-word-confidence w)))))
                                weak-words))
              (words '())
-             (total-len 0))
+             (total-len 0)
+             (last-word nil))
         (while (< total-len touchtype-line-length)
-          (let ((w (touchtype-algo--pick-weighted-float weighted)))
+          (let ((w (touchtype-algo--pick-weighted-float weighted))
+                (tries 0))
+            (while (and w (string= w last-word) (< tries 5))
+              (setq w (touchtype-algo--pick-weighted-float weighted))
+              (cl-incf tries))
             (when w
               (push w words)
+              (setq last-word w)
               (cl-incf total-len (1+ (length w))))))
         (mapconcat #'identity (nreverse words) " ")))))
 
