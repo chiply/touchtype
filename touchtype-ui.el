@@ -76,6 +76,49 @@ installs command remaps as a safety net for minor-mode bindings."
     (define-key map (kbd "C-c C-p") #'touchtype-ui--toggle-pause)
     map))
 
+;;;; Results buffer helpers
+
+(defvar-local touchtype-ui--goto-top-timer nil
+  "Timer used by `touchtype-ui--goto-top' to scroll to buffer start.")
+
+(defun touchtype-ui--goto-top ()
+  "Move point and window to the beginning of the current buffer.
+Uses a short repeating timer that retries until point is actually
+at the start, to survive deferred hooks from Evil, org-mode, etc."
+  (goto-char (point-min))
+  (when (timerp touchtype-ui--goto-top-timer)
+    (cancel-timer touchtype-ui--goto-top-timer))
+  (let ((buf (current-buffer))
+        (attempts 0))
+    (setq touchtype-ui--goto-top-timer
+          (run-with-timer
+           0.02 0.02
+           (lambda ()
+             (cl-incf attempts)
+             (if (or (not (buffer-live-p buf)) (>= attempts 15))
+                 (when (timerp touchtype-ui--goto-top-timer)
+                   (cancel-timer touchtype-ui--goto-top-timer)
+                   (setq touchtype-ui--goto-top-timer nil))
+               (with-current-buffer buf
+                 (goto-char (point-min))
+                 (let ((win (get-buffer-window buf)))
+                   (when win
+                     (set-window-point win (point-min))
+                     (set-window-start win (point-min)))))))))))
+
+;;;; Derived org modes for results buffers
+
+(define-derived-mode touchtype-results-mode org-mode "Touchtype-Results"
+  "Major mode for touchtype end-session results.
+Inherits `org-mode' and adds touchtype-specific bindings."
+  (define-key touchtype-results-mode-map (kbd "C-c r") #'touchtype-ui--restart-session)
+  (define-key touchtype-results-mode-map (kbd "C-c q") #'touchtype-ui--quit))
+
+(define-derived-mode touchtype-stats-mode org-mode "Touchtype-Stats"
+  "Major mode for touchtype statistics view.
+Inherits `org-mode' and adds touchtype-specific bindings."
+  (define-key touchtype-stats-mode-map (kbd "C-c q") #'kill-current-buffer))
+
 ;;;; Buffer setup
 
 (defun touchtype-ui-setup-buffer ()
@@ -155,6 +198,7 @@ installs command remaps as a safety net for minor-mode bindings."
         (setq touchtype-ui--keymap (touchtype-ui--make-keymap))
         (use-local-map touchtype-ui--keymap)
         (setq-local cursor-type nil)
+        (font-lock-mode -1)
         (setq buffer-read-only t)
         ;; Keep point anchored to the typing area after every command.
         ;; This prevents Evil (and anything else) from drifting into the
@@ -1298,47 +1342,28 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
                         (insert (propertize (format "[%c]" ch) 'font-lock-face face))))
                  do (insert "\n"))
         (insert "  Legend: "
-                (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-cold) " no data  "
-                (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-struggling) " <0.3  "
-                (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-developing) " 0.3-0.6  "
-                (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-good) " >=0.6\n"))
-      (insert "\n~TAB: fold/unfold  r: restart  q: quit~\n"))
-    (org-mode)
-    (org-table-map-tables #'org-table-align t)
-    (goto-char (point-min))
+                (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.0)) " no data  "
+                (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.15)) " low  "
+                (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.35)) " "
+                (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.5)) " "
+                (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.65)) " "
+                (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.8)) " "
+                (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 1.0)) " high\n"))
+      (insert "\n~TAB: fold/unfold  C-c r: restart  C-c q: quit~\n"))
+    (touchtype-results-mode)
+    (let ((inhibit-read-only t))
+      (org-table-map-tables #'org-table-align t))
     (setq buffer-read-only t)
-    (local-set-key (kbd "r") #'touchtype-ui--restart-session)
-    (local-set-key (kbd "q") #'touchtype-ui--quit)))))
+    (touchtype-ui--goto-top)))))
 
 (defun touchtype-ui--restart-session ()
-  "Reset counters and start a new session."
+  "Reset counters and start a new session.
+Calls `touchtype-ui-setup-buffer' to fully re-initialize the buffer,
+restoring `touchtype-mode', the typing keymap, and Evil emacs-state."
   (interactive)
   (touchtype-ui--cancel-session-timer)
   (touchtype-ui--stop-pace-caret)
-  (setq touchtype--session-wpm-samples nil
-        touchtype--session-errors      0
-        touchtype--session-total-keys  0
-        touchtype--session-word-count  0
-        touchtype--session-corrections 0
-        touchtype--session-start-time  nil
-        touchtype--session-line-wpms   nil
-        touchtype--typed-chars         nil
-        touchtype--session-idle-time   0.0
-        touchtype--preview-texts       nil
-        touchtype--completed-lines     nil
-        touchtype--paused              nil
-        touchtype--pause-start-time    nil
-        touchtype--word-streak         0
-        touchtype--best-word-streak    0
-        touchtype--perfect-line-achieved nil)
-  (when (overlayp touchtype--pause-overlay)
-    (delete-overlay touchtype--pause-overlay)
-    (setq touchtype--pause-overlay nil))
-  ;; Re-enable typing-area cursor lock and hide cursor
-  (setq-local cursor-type nil)
-  (add-hook 'post-command-hook #'touchtype-ui--enforce-point nil t)
-  (use-local-map touchtype-ui--keymap)
-  (touchtype-ui--render-new-line))
+  (touchtype-ui-setup-buffer))
 
 (defun touchtype-ui--at-leading-whitespace-p ()
   "Return non-nil if cursor is in leading whitespace of the current line."
@@ -1480,13 +1505,38 @@ Maps values to bar characters scaled min-to-max."
 
 ;;;; Heatmap and finger stats helpers
 
+(defun touchtype-ui--hsl-to-rgb (h s l)
+  "Convert HSL color (H in [0,360], S and L in [0,1]) to RGB hex string."
+  (let* ((c (* (- 1.0 (abs (- (* 2.0 l) 1.0))) s))
+         (x (* c (- 1.0 (abs (- (mod (/ h 60.0) 2.0) 1.0)))))
+         (m (- l (/ c 2.0)))
+         (rgb (cond
+               ((< h 60)  (list c x 0.0))
+               ((< h 120) (list x c 0.0))
+               ((< h 180) (list 0.0 c x))
+               ((< h 240) (list 0.0 x c))
+               ((< h 300) (list x 0.0 c))
+               (t         (list c 0.0 x)))))
+    (format "#%02x%02x%02x"
+            (round (* 255 (+ (nth 0 rgb) m)))
+            (round (* 255 (+ (nth 1 rgb) m)))
+            (round (* 255 (+ (nth 2 rgb) m))))))
+
+(defun touchtype-ui--heatmap-color (confidence)
+  "Return a hex color for CONFIDENCE using a red→yellow→green gradient.
+CONFIDENCE should be in [0, 1].  Values <= 0 get a gray color."
+  (if (<= confidence 0.0)
+      "#666666"
+    (let* ((clamped (min 1.0 (max 0.0 confidence)))
+           ;; Hue: 0 = red, 60 = yellow, 120 = green
+           (hue (* clamped 120.0)))
+      (touchtype-ui--hsl-to-rgb hue 0.75 0.45))))
+
 (defun touchtype-ui--heatmap-face (confidence)
-  "Return the face for CONFIDENCE value in the keyboard heatmap."
-  (cond
-   ((<= confidence 0.0)  'touchtype-face-heatmap-cold)
-   ((< confidence 0.3)   'touchtype-face-heatmap-struggling)
-   ((< confidence 0.6)   'touchtype-face-heatmap-developing)
-   (t                    'touchtype-face-heatmap-good)))
+  "Return a face spec for CONFIDENCE value in the keyboard heatmap.
+Uses a continuous color gradient from red (low) through yellow to green (high)."
+  (let ((color (touchtype-ui--heatmap-color confidence)))
+    (list :foreground color :weight 'bold)))
 
 (defun touchtype-ui--render-keyboard-heatmap ()
   "Insert a keyboard heatmap showing per-key confidence with color coding."
@@ -1508,10 +1558,13 @@ Maps values to bar characters scaled min-to-max."
                     (insert (propertize (format "[%c]" ch) 'font-lock-face face))))
              do (insert "\n"))
     (insert "  Legend: "
-            (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-cold) " no data  "
-            (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-struggling) " <0.3  "
-            (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-developing) " 0.3-0.6  "
-            (propertize "[x]" 'font-lock-face 'touchtype-face-heatmap-good) " >=0.6\n\n")))
+            (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.0)) " no data  "
+            (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.15)) " low  "
+            (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.35)) " "
+            (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.5)) " "
+            (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.65)) " "
+            (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.8)) " "
+            (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 1.0)) " high\n\n")))
 
 (defun touchtype-ui--render-finger-stats ()
   "Insert per-finger performance section as an org table."
@@ -1816,12 +1869,12 @@ Chart uses 8 rows matching the 8 levels of `touchtype-ui--bar-chars'."
                 (insert (format "- [%s] %s — %s\n"
                                 (if got "X" " ") name desc))))))
         (insert "\n"))
-      (org-mode)
-      (org-table-map-tables #'org-table-align t)
-      (goto-char (point-min))
-      (setq buffer-read-only t)
-      (local-set-key (kbd "q") #'kill-current-buffer))
-    (switch-to-buffer buf)))
+      (touchtype-stats-mode)
+      (let ((inhibit-read-only t))
+        (org-table-map-tables #'org-table-align t))
+      (setq buffer-read-only t))
+    (switch-to-buffer buf)
+    (touchtype-ui--goto-top)))
 
 (provide 'touchtype-ui)
 

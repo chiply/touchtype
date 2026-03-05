@@ -1880,21 +1880,36 @@ as focus chars in generated lines."
 
 ;;; ─── Phase 4: Analytics tests ─────────────────────────────────────────────────
 
-(ert-deftest touchtype-test-heatmap-face-cold ()
-  "Heatmap face for 0 confidence should be cold."
-  (should (eq (touchtype-ui--heatmap-face 0.0) 'touchtype-face-heatmap-cold)))
+(ert-deftest touchtype-test-heatmap-face-returns-face-plist ()
+  "Heatmap face should return a face plist with :foreground."
+  (let ((face (touchtype-ui--heatmap-face 0.5)))
+    (should (listp face))
+    (should (plist-get face :foreground))
+    (should (string-prefix-p "#" (plist-get face :foreground)))))
 
-(ert-deftest touchtype-test-heatmap-face-struggling ()
-  "Heatmap face for low confidence should be struggling."
-  (should (eq (touchtype-ui--heatmap-face 0.2) 'touchtype-face-heatmap-struggling)))
+(ert-deftest touchtype-test-heatmap-color-gradient ()
+  "Heatmap color should progress from red to green as confidence increases."
+  (let ((low (touchtype-ui--heatmap-color 0.1))
+        (mid (touchtype-ui--heatmap-color 0.5))
+        (high (touchtype-ui--heatmap-color 0.9)))
+    ;; All should be hex color strings
+    (should (string-prefix-p "#" low))
+    (should (string-prefix-p "#" mid))
+    (should (string-prefix-p "#" high))
+    ;; Colors should be different from each other
+    (should-not (string= low mid))
+    (should-not (string= mid high))))
 
-(ert-deftest touchtype-test-heatmap-face-developing ()
-  "Heatmap face for medium confidence should be developing."
-  (should (eq (touchtype-ui--heatmap-face 0.5) 'touchtype-face-heatmap-developing)))
+(ert-deftest touchtype-test-heatmap-color-zero ()
+  "Heatmap color for zero confidence should be gray."
+  (should (string= (touchtype-ui--heatmap-color 0.0) "#666666")))
 
-(ert-deftest touchtype-test-heatmap-face-good ()
-  "Heatmap face for high confidence should be good."
-  (should (eq (touchtype-ui--heatmap-face 0.8) 'touchtype-face-heatmap-good)))
+(ert-deftest touchtype-test-hsl-to-rgb ()
+  "HSL to RGB conversion should produce valid hex colors."
+  ;; Pure red: H=0, S=1, L=0.5
+  (should (string= (touchtype-ui--hsl-to-rgb 0 1.0 0.5) "#ff0000"))
+  ;; Pure green: H=120, S=1, L=0.5
+  (should (string= (touchtype-ui--hsl-to-rgb 120 1.0 0.5) "#00ff00")))
 
 (ert-deftest touchtype-test-finger-stats-aggregation ()
   "Finger stats should aggregate letter stats by finger."
