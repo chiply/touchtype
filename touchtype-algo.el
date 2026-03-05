@@ -301,191 +301,168 @@ Returns nil when the passage is exhausted."
 
 ;;;; Line generation
 
+(defconst touchtype-algo--alphabet "abcdefghijklmnopqrstuvwxyz"
+  "All 26 lowercase letters.")
+
+(defconst touchtype-algo--printable-ascii
+  (apply #'string (number-sequence 32 126))
+  "All printable ASCII characters.")
+
+(defun touchtype-algo--progressive-or-alphabet ()
+  "Return unlocked keys if progressive, otherwise full alphabet."
+  (if (touchtype-algo--progressive-p)
+      touchtype--unlocked-keys
+    touchtype-algo--alphabet))
+
 (defun touchtype-algo--allowed-for-mode ()
   "Return the allowed character string for the current mode."
   (pcase touchtype-mode-selection
-    ('progressive touchtype--unlocked-keys)
-    ('full-words  "abcdefghijklmnopqrstuvwxyz")
-    ('bigram-drill touchtype--unlocked-keys)
-    ('trigram-drill touchtype--unlocked-keys)
-    ('tetragram-drill touchtype--unlocked-keys)
-    ('ngram-drill touchtype--unlocked-keys)
-    ('letters     "abcdefghijklmnopqrstuvwxyz")
+    ;; Modes that always use unlocked keys
+    ((or 'progressive 'bigram-drill 'trigram-drill 'tetragram-drill 'ngram-drill)
+     touchtype--unlocked-keys)
+    ;; Modes that use progressive-or-alphabet
+    ((or 'common-words 'weak-letters 'weak-ngrams 'weak-mixed 'domain-words)
+     (touchtype-algo--progressive-or-alphabet))
+    ;; Full alphabet modes
+    ((or 'full-words 'letters 'weak-words)
+     touchtype-algo--alphabet)
+    ;; Extended character sets
     ('letters+numbers
-     (concat "abcdefghijklmnopqrstuvwxyz" touchtype--numbers))
+     (concat touchtype-algo--alphabet touchtype--numbers))
     ('letters+numbers+symbols
-     (concat "abcdefghijklmnopqrstuvwxyz"
-             touchtype--numbers touchtype--symbols))
+     (concat touchtype-algo--alphabet touchtype--numbers touchtype--symbols))
     ('narrative
-     (concat "abcdefghijklmnopqrstuvwxyz"
-             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+     (concat touchtype-algo--alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
              touchtype--numbers touchtype--symbols " "))
-    ('common-words (if (touchtype-algo--progressive-p)
-                       touchtype--unlocked-keys
-                     "abcdefghijklmnopqrstuvwxyz"))
+    ('quote
+     (concat touchtype-algo--alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+             touchtype--numbers touchtype--symbols " \""))
+    ;; Special modes
     ('custom
      (if touchtype--custom-passage
          (let ((chars (delete-dups (string-to-list touchtype--custom-passage))))
            (apply #'string (cl-remove-if (lambda (c) (= c ?\s)) chars)))
-       "abcdefghijklmnopqrstuvwxyz"))
-    ('code
-     (apply #'string (number-sequence 32 126)))
-    ('weak-letters (if (touchtype-algo--progressive-p)
-                       touchtype--unlocked-keys
-                     "abcdefghijklmnopqrstuvwxyz"))
-    ('weak-ngrams  (if (touchtype-algo--progressive-p)
-                       touchtype--unlocked-keys
-                     "abcdefghijklmnopqrstuvwxyz"))
-    ('weak-mixed   (if (touchtype-algo--progressive-p)
-                       touchtype--unlocked-keys
-                     "abcdefghijklmnopqrstuvwxyz"))
-    ('weak-words   "abcdefghijklmnopqrstuvwxyz")
-    ('quote
-     (concat "abcdefghijklmnopqrstuvwxyz"
-             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-             touchtype--numbers touchtype--symbols " \""))
-    ('domain-words (if (touchtype-algo--progressive-p)
-                       touchtype--unlocked-keys
-                     "abcdefghijklmnopqrstuvwxyz"))
+       touchtype-algo--alphabet))
+    ((or 'code 'symbol-drill) touchtype-algo--printable-ascii)
     ('left-hand  (touchtype-algo--hand-keys 'left))
     ('right-hand (touchtype-algo--hand-keys 'right))
-    ('symbol-drill
-     (apply #'string (number-sequence 32 126)))
-    ('finger-drill
-     (touchtype-algo--finger-keys touchtype--finger-selection))
+    ('finger-drill (touchtype-algo--finger-keys touchtype--finger-selection))
     (_ touchtype--unlocked-keys)))
+
+(defun touchtype-algo--build-word-line (pick-fn)
+  "Build a line of words by calling PICK-FN repeatedly.
+Fills to `touchtype-text-width' characters, space-separated."
+  (let ((words '()) (total-len 0))
+    (while (< total-len touchtype-text-width)
+      (let ((w (funcall pick-fn)))
+        (when w (push w words) (cl-incf total-len (1+ (length w))))))
+    (mapconcat #'identity (nreverse words) " ")))
+
+(defun touchtype-algo--build-word-line-from-vec (source)
+  "Build a line by picking random words from SOURCE vector."
+  (let ((n (length source)))
+    (touchtype-algo--build-word-line (lambda () (aref source (random n))))))
+
+(defun touchtype-algo--build-real-or-pseudo-line (allowed)
+  "Build a line using real words from ALLOWED chars, or pseudo-words as fallback."
+  (let* ((valid-words (touchtype-algo--filter-words-for-chars allowed))
+         (use-real (>= (length valid-words) 15)))
+    (touchtype-algo--build-word-line
+     (if use-real
+         (let ((n (length valid-words)))
+           (lambda () (nth (random n) valid-words)))
+       (lambda () (touchtype-algo-generate-word allowed))))))
 
 (defun touchtype-algo-generate-line ()
   "Generate a full line of text for the current mode.
 The line targets `touchtype-text-width' characters and is space-separated words."
-  (cond
-   ((eq touchtype-mode-selection 'bigram-drill)
-    (touchtype-algo-bigram-line))
-   ((eq touchtype-mode-selection 'trigram-drill)
-    (touchtype-algo-ngram-line touchtype--common-trigrams))
-   ((eq touchtype-mode-selection 'tetragram-drill)
-    (touchtype-algo-ngram-line touchtype--common-tetragrams))
-   ((eq touchtype-mode-selection 'ngram-drill)
-    (touchtype-algo-ngram-line (append touchtype--common-bigrams
-                                       touchtype--common-trigrams
-                                       touchtype--common-tetragrams)))
-   ((eq touchtype-mode-selection 'narrative)
-    (or (touchtype-narrative-generate-line)
-        (progn
-          (touchtype-narrative--prepare-passage)
-          (touchtype-narrative-generate-line))))
-   ((eq touchtype-mode-selection 'custom)
-    (touchtype-algo--generate-line-from-passage
-     'touchtype--custom-passage 'touchtype--custom-offset))
-   ((eq touchtype-mode-selection 'common-words)
-    (let* ((pool-size (length touchtype--builtin-words))
-           (n (if (zerop touchtype-common-words-count)
-                  pool-size
-                (min touchtype-common-words-count pool-size)))
-           (base-words (cl-subseq touchtype--builtin-words 0 n))
-           (source (if (touchtype-algo--progressive-p)
-                       (touchtype-algo--progressive-filter-words base-words)
-                     base-words))
-           (sn (length source))
-           (words '())
-           (total-len 0))
-      (while (< total-len touchtype-text-width)
-        (let ((w (aref source (random sn))))
-          (push w words)
-          (cl-incf total-len (1+ (length w)))))
-      (mapconcat #'identity (nreverse words) " ")))
-   ((eq touchtype-mode-selection 'code)
-    (unless touchtype--code-block-lines
-      (touchtype-algo--prepare-code-block))
-    (pop touchtype--code-block-lines))
-   ((eq touchtype-mode-selection 'weak-letters)
-    (touchtype-algo--weak-letters-line))
-   ((eq touchtype-mode-selection 'weak-ngrams)
-    (touchtype-algo--weak-ngrams-line))
-   ((eq touchtype-mode-selection 'weak-mixed)
-    (touchtype-algo--weak-mixed-line))
-   ((eq touchtype-mode-selection 'weak-words)
-    (touchtype-algo--weak-words-line))
-   ((eq touchtype-mode-selection 'quote)
-    (or (touchtype-algo--generate-line-from-passage
-         'touchtype--quote-passage 'touchtype--quote-offset)
-        (progn
-          (touchtype-algo--prepare-quote)
-          (touchtype-algo--generate-line-from-passage
-           'touchtype--quote-passage 'touchtype--quote-offset))))
-   ((eq touchtype-mode-selection 'domain-words)
-    (let* ((domain (or touchtype--domain-selection 'programming))
-           (words-vec (cdr (assq domain touchtype--domain-words))))
-      (if (and words-vec (> (length words-vec) 0))
-          (let* ((source (if (touchtype-algo--progressive-p)
+  (pcase touchtype-mode-selection
+    ('bigram-drill
+     (touchtype-algo-bigram-line))
+    ('trigram-drill
+     (touchtype-algo-ngram-line touchtype--common-trigrams))
+    ('tetragram-drill
+     (touchtype-algo-ngram-line touchtype--common-tetragrams))
+    ('ngram-drill
+     (touchtype-algo-ngram-line (append touchtype--common-bigrams
+                                        touchtype--common-trigrams
+                                        touchtype--common-tetragrams)))
+    ('narrative
+     (or (touchtype-narrative-generate-line)
+         (progn
+           (touchtype-narrative--prepare-passage)
+           (touchtype-narrative-generate-line))))
+    ('custom
+     (touchtype-algo--generate-line-from-passage
+      'touchtype--custom-passage 'touchtype--custom-offset))
+    ('common-words
+     (let* ((pool-size (length touchtype--builtin-words))
+            (n (if (zerop touchtype-common-words-count)
+                   pool-size
+                 (min touchtype-common-words-count pool-size)))
+            (base-words (cl-subseq touchtype--builtin-words 0 n))
+            (source (if (touchtype-algo--progressive-p)
+                        (touchtype-algo--progressive-filter-words base-words)
+                      base-words)))
+       (touchtype-algo--build-word-line-from-vec source)))
+    ('code
+     (unless touchtype--code-block-lines
+       (touchtype-algo--prepare-code-block))
+     (pop touchtype--code-block-lines))
+    ('weak-letters (touchtype-algo--weak-letters-line))
+    ('weak-ngrams  (touchtype-algo--weak-ngrams-line))
+    ('weak-mixed   (touchtype-algo--weak-mixed-line))
+    ('weak-words   (touchtype-algo--weak-words-line))
+    ('quote
+     (or (touchtype-algo--generate-line-from-passage
+          'touchtype--quote-passage 'touchtype--quote-offset)
+         (progn
+           (touchtype-algo--prepare-quote)
+           (touchtype-algo--generate-line-from-passage
+            'touchtype--quote-passage 'touchtype--quote-offset))))
+    ('domain-words
+     (let* ((domain (or touchtype--domain-selection 'programming))
+            (words-vec (cdr (assq domain touchtype--domain-words))))
+       (if (and words-vec (> (length words-vec) 0))
+           (let ((source (if (touchtype-algo--progressive-p)
                              (touchtype-algo--progressive-filter-words words-vec)
-                           words-vec))
-                 (n (length source))
-                 (words '()) (total-len 0))
-            (while (< total-len touchtype-text-width)
-              (push (aref source (random n)) words)
-              (cl-incf total-len (1+ (length (car words)))))
-            (mapconcat #'identity (nreverse words) " "))
-        ;; Fallback
-        (touchtype-algo-generate-word "abcdefghijklmnopqrstuvwxyz"))))
-   ((eq touchtype-mode-selection 'finger-drill)
-    (let* ((allowed (touchtype-algo--allowed-for-mode))
-           (valid-words (touchtype-algo--filter-words-for-chars allowed))
-           (use-real (>= (length valid-words) 15))
-           (words '()) (total-len 0))
-      (while (< total-len touchtype-text-width)
-        (let ((w (if use-real
-                     (nth (random (length valid-words)) valid-words)
-                   (touchtype-algo-generate-word allowed))))
-          (when w (push w words) (cl-incf total-len (1+ (length w))))))
-      (mapconcat #'identity (nreverse words) " ")))
-   ((memq touchtype-mode-selection '(left-hand right-hand))
-    (let* ((allowed (touchtype-algo--allowed-for-mode))
-           (valid-words (touchtype-algo--filter-words-for-chars allowed))
-           (use-real (>= (length valid-words) 15))
-           (words '()) (total-len 0))
-      (while (< total-len touchtype-text-width)
-        (let ((w (if use-real
-                     (nth (random (length valid-words)) valid-words)
-                   (touchtype-algo-generate-word allowed))))
-          (when w (push w words) (cl-incf total-len (1+ (length w))))))
-      (mapconcat #'identity (nreverse words) " ")))
-   ((eq touchtype-mode-selection 'symbol-drill)
-    (touchtype-algo--symbol-drill-line))
-   (t
-    (let* ((allowed (touchtype-algo--allowed-for-mode))
-           (words '())
-           (total-len 0)
-           (focus-char (if (eq touchtype-mode-selection 'progressive)
-                           (touchtype-algo--pick-focus-char)
-                         touchtype--focused-key))
-           (extra-chars (pcase touchtype-mode-selection
-                          ('letters+numbers touchtype--numbers)
-                          ('letters+numbers+symbols
-                           (concat touchtype--numbers touchtype--symbols))
-                          (_ nil)))
-           (pick-fn (if (memq touchtype-mode-selection '(full-words))
-                        ;; Use cached word list or build and cache it
-                        (let ((valid (or (and (boundp 'touchtype--valid-words-cache)
-                                              touchtype--valid-words-cache)
-                                         (let ((result (touchtype-algo--filter-words-for-chars allowed)))
-                                           (when (boundp 'touchtype--valid-words-cache)
-                                             (setq touchtype--valid-words-cache result))
-                                           result))))
-                          (if (>= (length valid) 15)
-                              (let ((n (length valid)))
-                                (lambda () (nth (random n) valid)))
-                            (lambda () (or (touchtype-algo-generate-word allowed) "hello"))))
-                      (lambda ()
-                        (touchtype-algo-generate-word allowed focus-char)))))
-      (while (< total-len touchtype-text-width)
-        (let ((w (if (and extra-chars (< (random 100) 30))
-                     (touchtype-algo--random-token extra-chars)
-                   (funcall pick-fn))))
-          (when w
-            (push w words)
-            (cl-incf total-len (1+ (length w))))))
-      (mapconcat #'identity (nreverse words) " ")))))
+                           words-vec)))
+             (touchtype-algo--build-word-line-from-vec source))
+         (touchtype-algo-generate-word touchtype-algo--alphabet))))
+    ((or 'finger-drill 'left-hand 'right-hand)
+     (touchtype-algo--build-real-or-pseudo-line (touchtype-algo--allowed-for-mode)))
+    ('symbol-drill
+     (touchtype-algo--symbol-drill-line))
+    (_
+     (let* ((allowed (touchtype-algo--allowed-for-mode))
+            (focus-char (if (eq touchtype-mode-selection 'progressive)
+                            (touchtype-algo--pick-focus-char)
+                          touchtype--focused-key))
+            (extra-chars (pcase touchtype-mode-selection
+                           ('letters+numbers touchtype--numbers)
+                           ('letters+numbers+symbols
+                            (concat touchtype--numbers touchtype--symbols))
+                           (_ nil)))
+            (pick-fn (if (memq touchtype-mode-selection '(full-words))
+                         (let ((valid (or (and (boundp 'touchtype--valid-words-cache)
+                                               touchtype--valid-words-cache)
+                                          (let ((result (touchtype-algo--filter-words-for-chars allowed)))
+                                            (when (boundp 'touchtype--valid-words-cache)
+                                              (setq touchtype--valid-words-cache result))
+                                            result))))
+                           (if (>= (length valid) 15)
+                               (let ((n (length valid)))
+                                 (lambda () (nth (random n) valid)))
+                             (lambda () (or (touchtype-algo-generate-word allowed) "hello"))))
+                       (lambda ()
+                         (touchtype-algo-generate-word allowed focus-char)))))
+       (touchtype-algo--build-word-line
+        (if extra-chars
+            (lambda ()
+              (if (< (random 100) 30)
+                  (touchtype-algo--random-token extra-chars)
+                (funcall pick-fn)))
+          pick-fn))))))
 
 ;;;; Inverse-confidence weighting for weak modes
 
@@ -567,36 +544,24 @@ suffix is built by walking forward from NGRAM end."
 (defun touchtype-algo--weak-letters-line ()
   "Generate a line focusing on the user's weakest letters.
 Pick focus chars from the bottom N letters weighted by inverse confidence."
-  (let* ((all-letters (if (touchtype-algo--progressive-p)
-                          touchtype--unlocked-keys
-                        "abcdefghijklmnopqrstuvwxyz"))
+  (let* ((all-letters (touchtype-algo--progressive-or-alphabet))
          (weights (touchtype-algo--inverse-confidence-weights all-letters))
-         ;; Sort by weight descending (weakest first)
          (sorted (sort (copy-sequence weights)
                        (lambda (a b) (> (cdr a) (cdr b)))))
          (top-n (seq-take sorted touchtype-weak-letter-count))
          (has-stats (cl-some (lambda (p) (> (cdr p) 0.01)) top-n)))
     (if (not has-stats)
-        ;; Cold start: fall back to standard pseudo-words
-        (let ((words '()) (total-len 0))
-          (while (< total-len touchtype-text-width)
-            (let ((w (touchtype-algo-generate-word all-letters)))
-              (when w (push w words) (cl-incf total-len (1+ (length w))))))
-          (mapconcat #'identity (nreverse words) " "))
-      ;; Generate words with weak-letter focus
-      (let ((words '()) (total-len 0))
-        (while (< total-len touchtype-text-width)
-          (let* ((focus (touchtype-algo--pick-weighted-float top-n))
-                 (w (touchtype-algo-generate-word all-letters focus)))
-            (when w (push w words) (cl-incf total-len (1+ (length w))))))
-        (mapconcat #'identity (nreverse words) " ")))))
+        (touchtype-algo--build-word-line
+         (lambda () (touchtype-algo-generate-word all-letters)))
+      (touchtype-algo--build-word-line
+       (lambda ()
+         (let ((focus (touchtype-algo--pick-weighted-float top-n)))
+           (touchtype-algo-generate-word all-letters focus)))))))
 
 (defun touchtype-algo--weak-ngrams-line ()
   "Generate a line drilling the user's weakest n-grams.
 50% embed in pseudo-words, 50% drill raw."
-  (let* ((all-letters (if (touchtype-algo--progressive-p)
-                          touchtype--unlocked-keys
-                        "abcdefghijklmnopqrstuvwxyz"))
+  (let* ((all-letters (touchtype-algo--progressive-or-alphabet))
          (raw-weak (mapcar #'car
                            (or (and (boundp 'touchtype--weak-ngrams-cache)
                                     touchtype--weak-ngrams-cache)
@@ -613,18 +578,14 @@ Pick focus chars from the bottom N letters weighted by inverse confidence."
                         raw-weak)
                      raw-weak)))
     (if (null all-weak)
-        ;; Cold start: fall back to common bigram drill
         (touchtype-algo-ngram-line touchtype--common-bigrams)
-      (let ((words '()) (total-len 0))
-        (while (< total-len touchtype-text-width)
-          (let* ((ngram (nth (random (length all-weak)) all-weak))
-                 (embed-p (< (random 100) 50))
-                 (w (if embed-p
-                        (touchtype-algo-generate-word-containing-ngram ngram all-letters)
-                      ngram)))
-            (push w words)
-            (cl-incf total-len (1+ (length w)))))
-        (mapconcat #'identity (nreverse words) " ")))))
+      (let ((n-weak (length all-weak)))
+        (touchtype-algo--build-word-line
+         (lambda ()
+           (let ((ngram (nth (random n-weak) all-weak)))
+             (if (< (random 100) 50)
+                 (touchtype-algo-generate-word-containing-ngram ngram all-letters)
+               ngram))))))))
 
 (defun touchtype-algo--weak-mixed-line ()
   "Generate a line mixing weak-letters and weak-ngrams approaches.
@@ -657,60 +618,36 @@ word consecutively."
   (let* ((weak (touchtype-stats-get-weak-words 50))
          (weak-words (mapcar #'car weak)))
     (if (null weak-words)
-        ;; Cold start: fall back to common-words behavior
-        (let* ((n (min 100 (length touchtype--builtin-words)))
-               (words '())
-               (total-len 0))
-          (while (< total-len touchtype-text-width)
-            (let ((w (aref touchtype--builtin-words (random n))))
-              (push w words)
-              (cl-incf total-len (1+ (length w)))))
-          (mapconcat #'identity (nreverse words) " "))
-      ;; Weight by inverse confidence; avoid consecutive repeats
+        (let ((n (min 100 (length touchtype--builtin-words))))
+          (touchtype-algo--build-word-line
+           (lambda () (aref touchtype--builtin-words (random n)))))
       (let* ((weighted (mapcar (lambda (w)
                                  (cons w (max 0.01 (- 1.0 (touchtype-stats-get-word-confidence w)))))
                                weak-words))
-             (words '())
-             (total-len 0)
              (last-word nil))
-        (while (< total-len touchtype-text-width)
-          (let ((w (touchtype-algo--pick-weighted-float weighted))
-                (tries 0))
-            (while (and w (string= w last-word) (< tries 5))
-              (setq w (touchtype-algo--pick-weighted-float weighted))
-              (cl-incf tries))
-            (when w
-              (push w words)
-              (setq last-word w)
-              (cl-incf total-len (1+ (length w))))))
-        (mapconcat #'identity (nreverse words) " ")))))
+        (touchtype-algo--build-word-line
+         (lambda ()
+           (let ((w (touchtype-algo--pick-weighted-float weighted))
+                 (tries 0))
+             (while (and w (string= w last-word) (< tries 5))
+               (setq w (touchtype-algo--pick-weighted-float weighted))
+               (cl-incf tries))
+             (setq last-word w)
+             w)))))))
 
 ;;;; Hand and layout helpers
 
 (defun touchtype-algo--hand-keys (hand)
   "Return the key string for HAND (symbol `left' or `right').
 Dispatches on `touchtype-keyboard-layout'."
-  (pcase (list touchtype-keyboard-layout hand)
-    ('(qwerty left)   touchtype--qwerty-left-hand)
-    ('(qwerty right)  touchtype--qwerty-right-hand)
-    ('(dvorak left)   touchtype--dvorak-left-hand)
-    ('(dvorak right)  touchtype--dvorak-right-hand)
-    ('(colemak left)  touchtype--colemak-left-hand)
-    ('(colemak right) touchtype--colemak-right-hand)
-    ('(workman left)  touchtype--workman-left-hand)
-    ('(workman right) touchtype--workman-right-hand)
-    (_ (if (eq hand 'left) touchtype--qwerty-left-hand touchtype--qwerty-right-hand))))
+  (let ((key (if (eq hand 'left) :left-hand :right-hand)))
+    (touchtype--layout-get touchtype-keyboard-layout key)))
 
 ;;;; Finger drill helpers
 
 (defun touchtype-algo--finger-map ()
   "Return the finger map alist for the current keyboard layout."
-  (pcase touchtype-keyboard-layout
-    ('qwerty  touchtype--qwerty-finger-map)
-    ('dvorak  touchtype--dvorak-finger-map)
-    ('colemak touchtype--colemak-finger-map)
-    ('workman touchtype--workman-finger-map)
-    (_        touchtype--qwerty-finger-map)))
+  (touchtype--layout-get touchtype-keyboard-layout :finger-map))
 
 (defun touchtype-algo--finger-keys (finger)
   "Return a string of keys assigned to FINGER in the current layout."
@@ -768,13 +705,10 @@ Dispatches on `touchtype-keyboard-layout'."
 
 (defun touchtype-algo--unlock-order ()
   "Return the unlock order string for the current keyboard layout."
-  (pcase touchtype-keyboard-layout
-    ('qwerty  touchtype--qwerty-unlock-order)
-    ('dvorak  touchtype--dvorak-unlock-order)
-    ('colemak touchtype--colemak-unlock-order)
-    ('workman touchtype--workman-unlock-order)
-    ('custom  (or touchtype-custom-unlock-order touchtype--qwerty-unlock-order))
-    (_        touchtype--qwerty-unlock-order)))
+  (if (eq touchtype-keyboard-layout 'custom)
+      (or touchtype-custom-unlock-order
+          (touchtype--layout-get 'qwerty :unlock-order))
+    (touchtype--layout-get touchtype-keyboard-layout :unlock-order)))
 
 (defun touchtype-algo--graduated-threshold (position)
   "Return unlock confidence threshold for key at POSITION (1-indexed).

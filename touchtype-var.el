@@ -367,24 +367,6 @@ Based on aggregated typing speed distribution data from online
 typing tests.  Used to show users how they compare to the general
 typing population.")
 
-(defconst touchtype--qwerty-unlock-order
-  "fjdkslahetniourgcmpbywvxqz"
-  "Order in which keys are progressively unlocked.
-Home-row index/middle/ring/pinky keys first, then by English
-letter frequency.  All 26 lower-case letters are represented.")
-
-(defconst touchtype--dvorak-unlock-order
-  "uhetonasidrljgcmfpbkwvyxqz"
-  "Dvorak layout progressive unlock order.")
-
-(defconst touchtype--colemak-unlock-order
-  "neiostahrdlufywpgmcbkvxjqz"
-  "Colemak layout progressive unlock order.")
-
-(defconst touchtype--workman-unlock-order
-  "nehtosaidruljgcmfpbkwvyxqz"
-  "Workman layout progressive unlock order.")
-
 (defconst touchtype--numbers "0123456789"
   "Digit characters available in letters+numbers modes.")
 
@@ -1276,49 +1258,96 @@ Each entry is a cons cell (TEXT . AUTHOR) with proper punctuation.")
 (defvar touchtype--domain-selection nil
   "Currently selected domain for `domain-words' mode.")
 
-;;;; Hand key maps per layout
+;;;; Consolidated keyboard layout data
 
-(defconst touchtype--qwerty-left-hand "qwertasdfgzxcvb"
-  "Left-hand keys for QWERTY layout.")
+(defconst touchtype--keyboard-layouts
+  '((qwerty . (:unlock-order "fjdkslahetniourgcmpbywvxqz"
+               :left-hand "qwertasdfgzxcvb"
+               :right-hand "yuiophjklnm"
+               :rows ("qwertyuiop" "asdfghjkl" "zxcvbnm")
+               :finger-map ((?q . left-pinky) (?a . left-pinky) (?z . left-pinky)
+                             (?w . left-ring)  (?s . left-ring)  (?x . left-ring)
+                             (?e . left-middle) (?d . left-middle) (?c . left-middle)
+                             (?r . left-index) (?f . left-index) (?v . left-index)
+                             (?t . left-index) (?g . left-index) (?b . left-index)
+                             (?y . right-index) (?h . right-index) (?n . right-index)
+                             (?u . right-index) (?j . right-index) (?m . right-index)
+                             (?i . right-middle) (?k . right-middle)
+                             (?o . right-ring) (?l . right-ring)
+                             (?p . right-pinky))))
+    (dvorak . (:unlock-order "uhetonasidrljgcmfpbkwvyxqz"
+               :left-hand "aoeuidhtns"
+               :right-hand "qjkxbmwvzypfgcrl"
+               :rows ("pyfgcrl" "aoeuidhtns" "qjkxbmwvz")
+               :finger-map ((?p . left-pinky) (?a . left-pinky) (?q . left-pinky)
+                             (?y . left-ring) (?o . left-ring) (?j . left-ring)
+                             (?f . left-middle) (?e . left-middle) (?k . left-middle)
+                             (?g . left-index) (?u . left-index) (?x . left-index)
+                             (?c . left-index) (?i . left-index) (?b . left-index)
+                             (?r . right-index) (?d . right-index) (?m . right-index)
+                             (?l . right-index) (?h . right-index) (?w . right-index)
+                             (?t . right-middle) (?n . right-middle) (?v . right-middle)
+                             (?s . right-ring) (?z . right-ring)
+                             (?\; . right-pinky))))
+    (colemak . (:unlock-order "neiostahrdlufywpgmcbkvxjqz"
+                :left-hand "qwfpgarstdzxcvb"
+                :right-hand "jluyneiohmk"
+                :rows ("qwfpgjluy" "arstdhneio" "zxcvbkm")
+                :finger-map ((?q . left-pinky) (?a . left-pinky) (?z . left-pinky)
+                              (?w . left-ring) (?r . left-ring) (?x . left-ring)
+                              (?f . left-middle) (?s . left-middle) (?c . left-middle)
+                              (?p . left-index) (?t . left-index) (?v . left-index)
+                              (?g . left-index) (?d . left-index) (?b . left-index)
+                              (?j . right-index) (?h . right-index) (?k . right-index)
+                              (?l . right-index) (?n . right-index) (?m . right-index)
+                              (?u . right-middle) (?e . right-middle)
+                              (?y . right-ring) (?i . right-ring)
+                              (?\; . right-pinky) (?o . right-pinky))))
+    (workman . (:unlock-order "nehtosaidruljgcmfpbkwvyxqz"
+                :left-hand "qdrwbashtgzxmcv"
+                :right-hand "jfupneioylk"
+                :rows ("qdrwbjfup" "ashtgyneoi" "zxmcvkl")
+                :finger-map ((?q . left-pinky) (?a . left-pinky) (?z . left-pinky)
+                              (?d . left-ring) (?s . left-ring) (?x . left-ring)
+                              (?r . left-middle) (?h . left-middle) (?m . left-middle)
+                              (?w . left-index) (?t . left-index) (?c . left-index)
+                              (?b . left-index) (?g . left-index) (?v . left-index)
+                              (?j . right-index) (?y . right-index) (?k . right-index)
+                              (?f . right-index) (?n . right-index) (?l . right-index)
+                              (?u . right-middle) (?e . right-middle)
+                              (?p . right-ring) (?o . right-ring) (?i . right-ring)))))
+  "Master keyboard layout data.
+Each entry is (LAYOUT . plist) with keys :unlock-order, :left-hand,
+:right-hand, :rows, and :finger-map.")
 
-(defconst touchtype--qwerty-right-hand "yuiophjklnm"
-  "Right-hand keys for QWERTY layout.")
+(defun touchtype--layout-get (layout key)
+  "Get KEY from LAYOUT in `touchtype--keyboard-layouts'.
+Falls back to qwerty if LAYOUT is not found."
+  (let ((data (cdr (or (assq layout touchtype--keyboard-layouts)
+                       (assq 'qwerty touchtype--keyboard-layouts)))))
+    (plist-get data key)))
 
-(defconst touchtype--dvorak-left-hand "aoeuidhtns"
-  "Left-hand keys for Dvorak layout.")
-
-(defconst touchtype--dvorak-right-hand "qjkxbmwvzypfgcrl"
-  "Right-hand keys for Dvorak layout.")
-
-(defconst touchtype--colemak-left-hand "qwfpgarstdzxcvb"
-  "Left-hand keys for Colemak layout.")
-
-(defconst touchtype--colemak-right-hand "jluyneiohmk"
-  "Right-hand keys for Colemak layout.")
-
-(defconst touchtype--workman-left-hand "qdrwbashtgzxmcv"
-  "Left-hand keys for Workman layout.")
-
-(defconst touchtype--workman-right-hand "jfupneioylk"
-  "Right-hand keys for Workman layout.")
-
-;;;; Keyboard rows per layout (for heatmap rendering)
-
-(defconst touchtype--qwerty-keyboard-rows
-  '("qwertyuiop" "asdfghjkl" "zxcvbnm")
-  "QWERTY keyboard rows (top, home, bottom).")
-
-(defconst touchtype--dvorak-keyboard-rows
-  '("pyfgcrl" "aoeuidhtns" "qjkxbmwvz")
-  "Dvorak keyboard rows.")
-
-(defconst touchtype--colemak-keyboard-rows
-  '("qwfpgjluy" "arstdhneio" "zxcvbkm")
-  "Colemak keyboard rows.")
-
-(defconst touchtype--workman-keyboard-rows
-  '("qdrwbjfup" "ashtgyneoi" "zxmcvkl")
-  "Workman keyboard rows.")
+;; Backward-compatible aliases (derived from master data)
+(defconst touchtype--qwerty-unlock-order (touchtype--layout-get 'qwerty :unlock-order))
+(defconst touchtype--dvorak-unlock-order (touchtype--layout-get 'dvorak :unlock-order))
+(defconst touchtype--colemak-unlock-order (touchtype--layout-get 'colemak :unlock-order))
+(defconst touchtype--workman-unlock-order (touchtype--layout-get 'workman :unlock-order))
+(defconst touchtype--qwerty-left-hand (touchtype--layout-get 'qwerty :left-hand))
+(defconst touchtype--qwerty-right-hand (touchtype--layout-get 'qwerty :right-hand))
+(defconst touchtype--dvorak-left-hand (touchtype--layout-get 'dvorak :left-hand))
+(defconst touchtype--dvorak-right-hand (touchtype--layout-get 'dvorak :right-hand))
+(defconst touchtype--colemak-left-hand (touchtype--layout-get 'colemak :left-hand))
+(defconst touchtype--colemak-right-hand (touchtype--layout-get 'colemak :right-hand))
+(defconst touchtype--workman-left-hand (touchtype--layout-get 'workman :left-hand))
+(defconst touchtype--workman-right-hand (touchtype--layout-get 'workman :right-hand))
+(defconst touchtype--qwerty-keyboard-rows (touchtype--layout-get 'qwerty :rows))
+(defconst touchtype--dvorak-keyboard-rows (touchtype--layout-get 'dvorak :rows))
+(defconst touchtype--colemak-keyboard-rows (touchtype--layout-get 'colemak :rows))
+(defconst touchtype--workman-keyboard-rows (touchtype--layout-get 'workman :rows))
+(defconst touchtype--qwerty-finger-map (touchtype--layout-get 'qwerty :finger-map))
+(defconst touchtype--dvorak-finger-map (touchtype--layout-get 'dvorak :finger-map))
+(defconst touchtype--colemak-finger-map (touchtype--layout-get 'colemak :finger-map))
+(defconst touchtype--workman-finger-map (touchtype--layout-get 'workman :finger-map))
 
 ;;;; Heatmap faces
 
@@ -1358,58 +1387,7 @@ Each entry is a cons cell (TEXT . AUTHOR) with proper punctuation.")
   "Face for heatmap keys with confidence >= 0.6."
   :group 'touchtype)
 
-;;;; Per-finger maps
-
-(defconst touchtype--qwerty-finger-map
-  '((?q . left-pinky) (?a . left-pinky) (?z . left-pinky)
-    (?w . left-ring)  (?s . left-ring)  (?x . left-ring)
-    (?e . left-middle) (?d . left-middle) (?c . left-middle)
-    (?r . left-index) (?f . left-index) (?v . left-index)
-    (?t . left-index) (?g . left-index) (?b . left-index)
-    (?y . right-index) (?h . right-index) (?n . right-index)
-    (?u . right-index) (?j . right-index) (?m . right-index)
-    (?i . right-middle) (?k . right-middle)
-    (?o . right-ring) (?l . right-ring)
-    (?p . right-pinky))
-  "QWERTY finger map: (char . finger-symbol).")
-
-(defconst touchtype--dvorak-finger-map
-  '((?p . left-pinky) (?a . left-pinky) (?q . left-pinky)
-    (?y . left-ring) (?o . left-ring) (?j . left-ring)
-    (?f . left-middle) (?e . left-middle) (?k . left-middle)
-    (?g . left-index) (?u . left-index) (?x . left-index)
-    (?c . left-index) (?i . left-index) (?b . left-index)
-    (?r . right-index) (?d . right-index) (?m . right-index)
-    (?l . right-index) (?h . right-index) (?w . right-index)
-    (?t . right-middle) (?n . right-middle) (?v . right-middle)
-    (?s . right-ring) (?z . right-ring)
-    (?\; . right-pinky))
-  "Dvorak finger map.")
-
-(defconst touchtype--colemak-finger-map
-  '((?q . left-pinky) (?a . left-pinky) (?z . left-pinky)
-    (?w . left-ring) (?r . left-ring) (?x . left-ring)
-    (?f . left-middle) (?s . left-middle) (?c . left-middle)
-    (?p . left-index) (?t . left-index) (?v . left-index)
-    (?g . left-index) (?d . left-index) (?b . left-index)
-    (?j . right-index) (?h . right-index) (?k . right-index)
-    (?l . right-index) (?n . right-index) (?m . right-index)
-    (?u . right-middle) (?e . right-middle)
-    (?y . right-ring) (?i . right-ring)
-    (?\; . right-pinky) (?o . right-pinky))
-  "Colemak finger map.")
-
-(defconst touchtype--workman-finger-map
-  '((?q . left-pinky) (?a . left-pinky) (?z . left-pinky)
-    (?d . left-ring) (?s . left-ring) (?x . left-ring)
-    (?r . left-middle) (?h . left-middle) (?m . left-middle)
-    (?w . left-index) (?t . left-index) (?c . left-index)
-    (?b . left-index) (?g . left-index) (?v . left-index)
-    (?j . right-index) (?y . right-index) (?k . right-index)
-    (?f . right-index) (?n . right-index) (?l . right-index)
-    (?u . right-middle) (?e . right-middle)
-    (?p . right-ring) (?o . right-ring) (?i . right-ring))
-  "Workman finger map.")
+;;;; Per-finger maps (derived from master layout data above)
 
 (defconst touchtype--finger-names
   '((left-pinky  . "L Pinky")

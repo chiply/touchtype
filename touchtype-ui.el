@@ -537,6 +537,49 @@ Call before erasing the buffer to prevent stale marker errors."
   (setq touchtype--target-start nil
         touchtype--status-start nil))
 
+(defun touchtype-ui--compute-session-metrics ()
+  "Compute and return session metrics as a plist.
+Keys: :total-keys, :total-errs, :corrections, :elapsed-s,
+:minutes, :gross-wpm, :uncorrected, :net-wpm, :accuracy."
+  (let* ((total-keys  touchtype--session-total-keys)
+         (total-errs  touchtype--session-errors)
+         (corrections touchtype--session-corrections)
+         (raw-elapsed (if touchtype--session-start-time
+                         (- (float-time) touchtype--session-start-time)
+                       0.0))
+         (idle        (or touchtype--session-idle-time 0.0))
+         (elapsed-s   (max 0.0 (- raw-elapsed idle)))
+         (minutes     (/ elapsed-s 60.0))
+         (gross-wpm   (if (> minutes 0)
+                          (/ (/ (float total-keys) 5.0) minutes)
+                        0.0))
+         (uncorrected (max 0 (- total-errs corrections)))
+         (net-wpm     (if (> minutes 0)
+                          (max 0.0 (/ (- (/ (float total-keys) 5.0) uncorrected)
+                                      minutes))
+                        0.0))
+         (accuracy    (if (> total-keys 0)
+                          (* 100.0 (/ (float (- total-keys total-errs))
+                                      total-keys))
+                        100.0)))
+    (list :total-keys total-keys :total-errs total-errs
+          :corrections corrections :elapsed-s elapsed-s
+          :minutes minutes :gross-wpm gross-wpm
+          :uncorrected uncorrected :net-wpm net-wpm
+          :accuracy accuracy)))
+
+(defun touchtype-ui--teardown-session ()
+  "Clean up session state after typing is done.
+Disables cursor lock, removes overlays, and restores cursor."
+  (setq touchtype--current-text nil)
+  (remove-hook 'post-command-hook #'touchtype-ui--enforce-point t)
+  (touchtype-ui--cleanup-overlays)
+  (setq-local cursor-type t))
+
+(defun touchtype-ui--get-keyboard-rows ()
+  "Return the keyboard rows for the current layout."
+  (touchtype--layout-get touchtype-keyboard-layout :rows))
+
 (defun touchtype-ui--update-status ()
   "Rewrite the status area in place."
   (when (and touchtype--status-start
@@ -676,9 +719,7 @@ status line or elsewhere after each command."
     (setq touchtype--paused t
           touchtype--pause-start-time (float-time))
     ;; Cancel timers
-    (touchtype-ui--cancel-session-timer)
-    (touchtype-ui--stop-pace-caret)
-    (touchtype-ui--stop-wpm-sampling)
+    (touchtype-ui--stop-all-timers)
     ;; Show PAUSED overlay
     (when touchtype--target-start
       (let* ((start (marker-position touchtype--target-start))
@@ -694,37 +735,21 @@ status line or elsewhere after each command."
 (defun touchtype-ui--end-session-failed ()
   "End the session due to difficulty tier failure.
 Shows SESSION FAILED header and records :failed t in session."
-  (touchtype-ui--cancel-session-timer)
-  (touchtype-ui--stop-pace-caret)
-  (touchtype-ui--stop-wpm-sampling)
-  (let* ((total-keys touchtype--session-total-keys)
-         (total-errs touchtype--session-errors)
-         (corrections touchtype--session-corrections)
-         (raw-elapsed (if touchtype--session-start-time
-                         (- (float-time) touchtype--session-start-time)
-                       0.0))
-         (idle (or touchtype--session-idle-time 0.0))
-         (elapsed-s (max 0.0 (- raw-elapsed idle)))
-         (minutes (/ elapsed-s 60.0))
-         (gross-wpm (if (> minutes 0)
-                        (/ (/ (float total-keys) 5.0) minutes)
-                      0.0))
-         (uncorrected (max 0 (- total-errs corrections)))
-         (net-wpm (if (> minutes 0)
-                      (max 0.0 (/ (- (/ (float total-keys) 5.0) uncorrected) minutes))
-                    0.0))
-         (accuracy (if (> total-keys 0)
-                       (* 100.0 (/ (float (- total-keys total-errs)) total-keys))
-                     100.0)))
+  (touchtype-ui--stop-all-timers)
+  (let* ((m (touchtype-ui--compute-session-metrics))
+         (net-wpm (plist-get m :net-wpm))
+         (accuracy (plist-get m :accuracy))
+         (gross-wpm (plist-get m :gross-wpm))
+         (total-keys (plist-get m :total-keys))
+         (elapsed-s (plist-get m :elapsed-s))
+         (corrections (plist-get m :corrections))
+         (uncorrected (plist-get m :uncorrected)))
     (touchtype-stats-record-session
      net-wpm accuracy touchtype-mode-selection touchtype--session-word-count
      :gross-wpm gross-wpm :total-time elapsed-s :total-chars total-keys
      :corrections corrections :uncorrected-errors uncorrected :failed t)
     (touchtype-stats-save)
-    (setq touchtype--current-text nil)
-    (remove-hook 'post-command-hook #'touchtype-ui--enforce-point t)
-    (touchtype-ui--cleanup-overlays)
-    (setq-local cursor-type t)
+    (touchtype-ui--teardown-session)
     (let ((inhibit-read-only t))
       (erase-buffer)
       (insert "\n")
@@ -752,6 +777,19 @@ Shows SESSION FAILED header and records :failed t in session."
   (let ((char last-command-event))
     (when (characterp char)
       (touchtype-ui--process-char char))))
+
+(defun touchtype-ui--word-has-error-p (pos text)
+  "Return non-nil if the word ending at POS in TEXT has any errors.
+Walks backward through `touchtype--typed-chars' checking for mistyped characters."
+  (let ((has-error nil)
+        (check-pos (1- pos)))
+    (while (and (>= check-pos 0)
+                (not (= (aref text check-pos) ?\s)))
+      (let ((rec (nth (- pos check-pos 1) touchtype--typed-chars)))
+        (when (and rec (not (cadr rec)))
+          (setq has-error t)))
+      (cl-decf check-pos))
+    has-error))
 
 (defun touchtype-ui--process-char (char)
   "Process CHAR typed by the user against the current target text."
@@ -783,20 +821,12 @@ Shows SESSION FAILED header and records :failed t in session."
         (cl-return-from touchtype-ui--process-char))
       ;; Difficulty tier: expert mode - fail at word boundary if word has errors
       (when (and (eq touchtype-difficulty 'expert)
-                 expected (= expected ?\s))
-        (let ((has-error nil)
-              (check-pos (1- pos)))
-          (while (and (>= check-pos 0)
-                      (not (= (aref text check-pos) ?\s)))
-            (let ((rec (nth (- pos check-pos 1) touchtype--typed-chars)))
-              (when (and rec (not (cadr rec)))
-                (setq has-error t)))
-            (cl-decf check-pos))
-          (when has-error
-            (cl-incf touchtype--session-total-keys)
-            (cl-incf touchtype--session-errors)
-            (touchtype-ui--end-session-failed)
-            (cl-return-from touchtype-ui--process-char))))
+                 expected (= expected ?\s)
+                 (touchtype-ui--word-has-error-p pos text))
+        (cl-incf touchtype--session-total-keys)
+        (cl-incf touchtype--session-errors)
+        (touchtype-ui--end-session-failed)
+        (cl-return-from touchtype-ui--process-char))
       ;; Stop-on-error: letter mode blocks on wrong key
       (when (and (eq touchtype-error-mode 'letter) (not correct-p))
         (cl-incf touchtype--session-total-keys)
@@ -806,20 +836,12 @@ Shows SESSION FAILED header and records :failed t in session."
         (cl-return-from touchtype-ui--process-char))
       ;; Stop-on-error: word mode blocks at space if preceding word has errors
       (when (and (eq touchtype-error-mode 'word)
-                 expected (= expected ?\s))
-        (let ((has-error nil)
-              (check-pos (1- pos)))
-          (while (and (>= check-pos 0)
-                      (not (= (aref text check-pos) ?\s)))
-            (let ((rec (nth (- pos check-pos 1) touchtype--typed-chars)))
-              (when (and rec (not (cadr rec)))
-                (setq has-error t)))
-            (cl-decf check-pos))
-          (when has-error
-            (cl-incf touchtype--session-total-keys)
-            (cl-incf touchtype--session-errors)
-            (touchtype-ui--update-status)
-            (cl-return-from touchtype-ui--process-char))))
+                 expected (= expected ?\s)
+                 (touchtype-ui--word-has-error-p pos text))
+        (cl-incf touchtype--session-total-keys)
+        (cl-incf touchtype--session-errors)
+        (touchtype-ui--update-status)
+        (cl-return-from touchtype-ui--process-char))
       ;; Start timers on first keypress of a line / session
       (unless touchtype--line-start-time
         (setq touchtype--line-start-time now)
@@ -946,9 +968,7 @@ Shows SESSION FAILED header and records :failed t in session."
   "Save stats and quit the touchtype session."
   (interactive)
   (when (yes-or-no-p "Quit touchtype session? ")
-    (touchtype-ui--cancel-session-timer)
-    (touchtype-ui--stop-pace-caret)
-    (touchtype-ui--stop-wpm-sampling)
+    (touchtype-ui--stop-all-timers)
     (remove-hook 'window-size-change-functions
                  #'touchtype-ui--update-margins t)
     (touchtype-stats-save)
@@ -1275,37 +1295,19 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
 (defun touchtype-ui--end-session ()
   "Display the session summary and prompt to continue or quit."
   ;; Cancel any active timers
-  (touchtype-ui--cancel-session-timer)
-  (touchtype-ui--stop-pace-caret)
-  (touchtype-ui--stop-wpm-sampling)
+  (touchtype-ui--stop-all-timers)
   ;; Take one final WPM sample
   (touchtype-ui--sample-wpm (current-buffer))
   (let* ((touchtype--confidence-cache (make-hash-table :test 'equal))
-         (total-keys  touchtype--session-total-keys)
-         (total-errs  touchtype--session-errors)
-         (corrections touchtype--session-corrections)
-         (raw-elapsed (if touchtype--session-start-time
-                         (- (float-time) touchtype--session-start-time)
-                       0.0))
-         (idle        (or touchtype--session-idle-time 0.0))
-         (elapsed-s   (max 0.0 (- raw-elapsed idle)))
-         (minutes     (/ elapsed-s 60.0))
-         ;; Gross WPM: (total-chars / 5) / minutes
-         (gross-wpm   (if (> minutes 0)
-                          (/ (/ (float total-keys) 5.0) minutes)
-                        0.0))
-         ;; Uncorrected errors: total errors minus corrections (but not below 0)
-         (uncorrected (max 0 (- total-errs corrections)))
-         ;; Net WPM: ((total-chars / 5) - uncorrected) / minutes
-         (net-wpm     (if (> minutes 0)
-                          (max 0.0 (/ (- (/ (float total-keys) 5.0) uncorrected)
-                                      minutes))
-                        0.0))
-         ;; Accuracy
-         (accuracy    (if (> total-keys 0)
-                          (* 100.0 (/ (float (- total-keys total-errs))
-                                      total-keys))
-                        100.0))
+         (m (touchtype-ui--compute-session-metrics))
+         (total-keys  (plist-get m :total-keys))
+         (total-errs  (plist-get m :total-errs))
+         (corrections (plist-get m :corrections))
+         (elapsed-s   (plist-get m :elapsed-s))
+         (gross-wpm   (plist-get m :gross-wpm))
+         (uncorrected (plist-get m :uncorrected))
+         (net-wpm     (plist-get m :net-wpm))
+         (accuracy    (plist-get m :accuracy))
          ;; Raw accuracy (including corrected mistakes)
          (raw-acc     (if (> total-keys 0)
                           (* 100.0 (/ (float (- total-keys total-errs))
@@ -1354,11 +1356,7 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
             (new-level (touchtype-stats-get-level))
             (level-up-p (> (touchtype-stats-get-level) old-level)))
     (touchtype-stats-save)
-    ;; Disable typing-area cursor lock so the end-session buffer is navigable
-    (setq touchtype--current-text nil)
-    (remove-hook 'post-command-hook #'touchtype-ui--enforce-point t)
-    (touchtype-ui--cleanup-overlays)
-    (setq-local cursor-type t)
+    (touchtype-ui--teardown-session)
     (let ((inhibit-read-only t))
       (erase-buffer)
       ;; Notifications
@@ -1504,12 +1502,7 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
             (touchtype-ui--align-table-before tbl-start))))
       ;; Keyboard heatmap (session-level accuracy)
       (insert "\n** Keyboard Heatmap\n")
-      (let* ((rows (pcase touchtype-keyboard-layout
-                     ('qwerty  touchtype--qwerty-keyboard-rows)
-                     ('dvorak  touchtype--dvorak-keyboard-rows)
-                     ('colemak touchtype--colemak-keyboard-rows)
-                     ('workman touchtype--workman-keyboard-rows)
-                     (_        touchtype--qwerty-keyboard-rows)))
+      (let* ((rows (touchtype-ui--get-keyboard-rows))
              (indents '("  " "   " "    "))
              (key-stats touchtype--session-key-stats))
         (cl-loop for row in rows
@@ -1551,9 +1544,7 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
 Kills the current buffer and creates a fresh one via
 `touchtype-ui-setup-buffer', avoiding stale org-mode/jit-lock state."
   (interactive)
-  (touchtype-ui--cancel-session-timer)
-  (touchtype-ui--stop-pace-caret)
-  (touchtype-ui--stop-wpm-sampling)
+  (touchtype-ui--stop-all-timers)
   ;; Kill the buffer outright so org-mode's jit-lock state is fully
   ;; discarded, then create a fresh *touchtype* buffer.
   (kill-buffer (current-buffer))
@@ -1623,6 +1614,12 @@ Omits zero-valued leading components."
   (when (timerp touchtype--session-timer)
     (cancel-timer touchtype--session-timer)
     (setq touchtype--session-timer nil)))
+
+(defun touchtype-ui--stop-all-timers ()
+  "Cancel session timer and stop pace caret and WPM sampling."
+  (touchtype-ui--cancel-session-timer)
+  (touchtype-ui--stop-pace-caret)
+  (touchtype-ui--stop-wpm-sampling))
 
 (defun touchtype-ui--timed-session-expire (buf)
   "Called when a timed session expires in BUF.
@@ -1826,12 +1823,7 @@ Uses a continuous color gradient from red (low) through yellow to green (high)."
   "Insert a keyboard heatmap showing per-key confidence with color coding.
 When MODE is non-nil, use per-mode confidence.
 HEADING-LEVEL is the org heading depth (default 1)."
-  (let* ((rows (pcase touchtype-keyboard-layout
-                 ('qwerty  touchtype--qwerty-keyboard-rows)
-                 ('dvorak  touchtype--dvorak-keyboard-rows)
-                 ('colemak touchtype--colemak-keyboard-rows)
-                 ('workman touchtype--workman-keyboard-rows)
-                 (_        touchtype--qwerty-keyboard-rows)))
+  (let* ((rows (touchtype-ui--get-keyboard-rows))
          (indents '("  " "   " "    "))
          (stars (make-string (or heading-level 1) ?*)))
     (insert (format "%s Keyboard Heatmap\n" stars))
