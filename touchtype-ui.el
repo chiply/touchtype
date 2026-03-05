@@ -195,7 +195,9 @@ Optional _FRAME argument is accepted for `window-size-change-functions'."
                        touchtype--zen-active
                        touchtype--session-ending
                        touchtype--weak-ngrams-cache
-                       touchtype--valid-words-cache))
+                       touchtype--valid-words-cache
+                       touchtype--session-wpm-timeseries
+                       touchtype--wpm-sample-timer))
           (make-local-variable sym))
         ;; Load persisted state (force re-read from disk)
         (touchtype-stats-load t)
@@ -219,6 +221,8 @@ Optional _FRAME argument is accepted for `window-size-change-functions'."
               touchtype--paused              nil
               touchtype--pause-start-time    nil
               touchtype--pause-overlay       nil
+              touchtype--session-wpm-timeseries nil
+              touchtype--wpm-sample-timer    nil
               touchtype--word-streak         0
               touchtype--best-word-streak    0
               touchtype--perfect-line-achieved nil
@@ -597,6 +601,8 @@ status line or elsewhere after each command."
         ;; Restart pace caret
         (when touchtype-pace-caret
           (touchtype-ui--start-pace-caret))
+        ;; Restart WPM sampling
+        (touchtype-ui--start-wpm-sampling)
         ;; Remove pause overlay
         (when (overlayp touchtype--pause-overlay)
           (delete-overlay touchtype--pause-overlay)
@@ -608,6 +614,7 @@ status line or elsewhere after each command."
     ;; Cancel timers
     (touchtype-ui--cancel-session-timer)
     (touchtype-ui--stop-pace-caret)
+    (touchtype-ui--stop-wpm-sampling)
     ;; Show PAUSED overlay
     (when touchtype--target-start
       (let* ((start (marker-position touchtype--target-start))
@@ -625,6 +632,7 @@ status line or elsewhere after each command."
 Shows SESSION FAILED header and records :failed t in session."
   (touchtype-ui--cancel-session-timer)
   (touchtype-ui--stop-pace-caret)
+  (touchtype-ui--stop-wpm-sampling)
   (let* ((total-keys touchtype--session-total-keys)
          (total-errs touchtype--session-errors)
          (corrections touchtype--session-corrections)
@@ -756,6 +764,8 @@ Shows SESSION FAILED header and records :failed t in session."
           (touchtype-ui--start-pace-caret)))
       (unless touchtype--session-start-time
         (setq touchtype--session-start-time now)
+        ;; Start WPM sampling for time-series graph
+        (touchtype-ui--start-wpm-sampling)
         ;; Start timed session timer on first keypress
         (when (eq touchtype-session-type 'timed)
           (setq touchtype--session-timer
@@ -874,6 +884,7 @@ Shows SESSION FAILED header and records :failed t in session."
   (when (yes-or-no-p "Quit touchtype session? ")
     (touchtype-ui--cancel-session-timer)
     (touchtype-ui--stop-pace-caret)
+    (touchtype-ui--stop-wpm-sampling)
 
     (remove-hook 'window-size-change-functions
                  #'touchtype-ui--update-margins t)
@@ -1203,6 +1214,9 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
   ;; Cancel any active timers
   (touchtype-ui--cancel-session-timer)
   (touchtype-ui--stop-pace-caret)
+  (touchtype-ui--stop-wpm-sampling)
+  ;; Take one final WPM sample
+  (touchtype-ui--sample-wpm (current-buffer))
   (let* ((touchtype--confidence-cache (make-hash-table :test 'equal))
          (total-keys  touchtype--session-total-keys)
          (total-errs  touchtype--session-errors)
@@ -1455,6 +1469,13 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
                 (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.65)) " "
                 (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 0.8)) " "
                 (propertize "[x]" 'font-lock-face (touchtype-ui--heatmap-face 1.0)) " high\n"))
+      ;; WPM over time chart
+      (when (and touchtype--session-wpm-timeseries
+                 (>= (length touchtype--session-wpm-timeseries) 3))
+        (insert "\n** WPM Over Time\n")
+        (insert (touchtype-ui--render-wpm-chart
+                 touchtype--session-wpm-timeseries 50 10))
+        (insert "\n\n"))
       (insert "\n~TAB: fold/unfold  C-c C-r: restart  C-c C-q: quit~\n"))
     (touchtype-results-mode)
     (setq buffer-read-only t)
@@ -1467,6 +1488,7 @@ Kills the current buffer and creates a fresh one via
   (interactive)
   (touchtype-ui--cancel-session-timer)
   (touchtype-ui--stop-pace-caret)
+  (touchtype-ui--stop-wpm-sampling)
   ;; Kill the buffer outright so org-mode's jit-lock state is fully
   ;; discarded, then create a fresh *touchtype* buffer.
   (kill-buffer (current-buffer))
@@ -1613,6 +1635,91 @@ Maps values to bar characters scaled min-to-max."
           ;; Stop when past end
           (when (>= touchtype--pace-pos n)
             (touchtype-ui--stop-pace-caret)))))))
+
+;;;; WPM time-series sampling
+
+(defun touchtype-ui--start-wpm-sampling ()
+  "Start a 1-second timer that samples current WPM into the time series."
+  (touchtype-ui--stop-wpm-sampling)
+  (setq touchtype--wpm-sample-timer
+        (run-at-time 1 1 #'touchtype-ui--sample-wpm (current-buffer))))
+
+(defun touchtype-ui--stop-wpm-sampling ()
+  "Cancel the WPM sampling timer."
+  (when (timerp touchtype--wpm-sample-timer)
+    (cancel-timer touchtype--wpm-sample-timer)
+    (setq touchtype--wpm-sample-timer nil)))
+
+(defun touchtype-ui--sample-wpm (buf)
+  "Sample the current WPM and append to the time series in BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (and touchtype--session-start-time
+                 (not touchtype--paused)
+                 (> touchtype--session-total-keys 0))
+        (let* ((now (float-time))
+               (raw-elapsed (- now touchtype--session-start-time))
+               (idle (or touchtype--session-idle-time 0.0))
+               (elapsed (max 0.01 (- raw-elapsed idle)))
+               (minutes (/ elapsed 60.0))
+               (total touchtype--session-total-keys)
+               (errors touchtype--session-errors)
+               (corrections touchtype--session-corrections)
+               (uncorr (max 0 (- errors corrections)))
+               (net-wpm (max 0.0 (/ (- (/ (float total) 5.0) uncorr) minutes))))
+          (push (cons elapsed net-wpm)
+                touchtype--session-wpm-timeseries))))))
+
+(defun touchtype-ui--render-wpm-chart (timeseries width height)
+  "Render an ASCII WPM-over-time chart from TIMESERIES.
+TIMESERIES is a list of (ELAPSED . WPM) pairs.
+WIDTH is the chart width in columns, HEIGHT is the chart height in rows.
+Returns the chart as a string."
+  (let* ((sorted (sort (copy-sequence timeseries)
+                       (lambda (a b) (< (car a) (car b)))))
+         (wpms (mapcar #'cdr sorted))
+         (n (length wpms))
+         (lo (apply #'min wpms))
+         (hi (apply #'max wpms))
+         (range (max 1.0 (- hi lo)))
+         ;; Resample to WIDTH buckets
+         (buckets (make-vector width 0.0))
+         (bucket-counts (make-vector width 0))
+         (max-time (caar (last sorted)))
+         (lines nil))
+    ;; Distribute samples into buckets
+    (dolist (pair sorted)
+      (let* ((t-frac (if (> max-time 0) (/ (car pair) max-time) 0.0))
+             (idx (min (1- width) (floor (* t-frac width)))))
+        (aset buckets idx (+ (aref buckets idx) (cdr pair)))
+        (aset bucket-counts idx (1+ (aref bucket-counts idx)))))
+    ;; Average each bucket; fill empty buckets with neighbor values
+    (dotimes (i width)
+      (if (> (aref bucket-counts i) 0)
+          (aset buckets i (/ (aref buckets i) (aref bucket-counts i)))
+        (aset buckets i (if (> i 0) (aref buckets (1- i)) lo))))
+    ;; Render rows top to bottom
+    (dotimes (row height)
+      (let* ((inv-row (- height 1 row))
+             (threshold (+ lo (* (/ (float inv-row) (1- height)) range)))
+             (chars nil))
+        ;; Y-axis label on first and last row
+        (let ((label (cond ((= row 0) (format "%3.0f│" hi))
+                           ((= row (1- height)) (format "%3.0f│" lo))
+                           (t "    │"))))
+          (push label chars))
+        (dotimes (col width)
+          (let ((val (aref buckets col)))
+            (push (if (>= val threshold) "█" " ") chars)))
+        (push (apply #'concat (nreverse chars)) lines)))
+    ;; X-axis
+    (let* ((axis-line (concat "    └" (make-string width ?─)))
+           (time-label (format "    0s%s%s"
+                               (make-string (max 0 (- (/ width 2) 3)) ?\s)
+                               (format "%.0fs" max-time))))
+      (push axis-line lines)
+      (push time-label lines))
+    (mapconcat #'identity (nreverse lines) "\n")))
 
 ;;;; Heatmap and finger stats helpers
 

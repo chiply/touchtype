@@ -232,6 +232,13 @@ This is buffer-local and reset each session.")
 Set once at session start, cleared on session end.  Avoids re-sorting
 thousands of bigram entries on every new line.")
 
+(defvar touchtype--session-wpm-timeseries nil
+  "List of (ELAPSED-SECONDS . WPM) pairs sampled every second during a session.
+Used to render a WPM-over-time graph on the results screen.")
+
+(defvar touchtype--wpm-sample-timer nil
+  "Timer that samples WPM once per second during a session.")
+
 (defvar touchtype--valid-words-cache nil
   "Cached list of valid words for the current mode's allowed characters.
 Avoids re-filtering `touchtype--builtin-words' on every line generation.")
