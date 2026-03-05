@@ -1400,6 +1400,8 @@ NEW-ACHIEVEMENTS is the list of newly earned achievement IDs."
         (insert (format "| Net CPM   | %6d |\n" (round (* net-wpm 5))))
         (insert (format "| Gross CPM | %6d |\n" (round (* gross-wpm 5))))
         (touchtype-ui--align-table-before tbl-start))
+      (let ((percentile (touchtype-stats-wpm-percentile net-wpm)))
+        (insert (format "\nFaster than *%.0f%%* of typists\n" percentile)))
       ;; Accuracy
       (insert "\n** Accuracy\n")
       (let ((tbl-start (point)))
