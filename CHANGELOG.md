@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.13](https://github.com/chiply/touchtype/compare/v0.1.12...v0.1.13) (2026-03-05)
+
+
+### Bug Fixes
+
+* consolidate duplicated patterns across all modules ([cd1092e](https://github.com/chiply/touchtype/commit/cd1092edd75d39d94b1dc4a0aa25570e256877e5))
+
 ## [0.1.12](https://github.com/chiply/touchtype/compare/v0.1.11...v0.1.12) (2026-03-05)
 
 
